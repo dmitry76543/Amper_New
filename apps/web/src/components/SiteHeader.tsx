@@ -1,14 +1,17 @@
 "use client"
 
 import Link from "next/link"
-import { useRouter } from "next/navigation"
-import { FormEvent, useEffect, useState } from "react"
+import { usePathname, useRouter, useSearchParams } from "next/navigation"
+import { FormEvent, Suspense, useEffect, useRef, useState } from "react"
 import { useCart } from "@/components/CartProvider"
 import { useCustomer } from "@/components/CustomerProvider"
 import { Icon } from "@/components/icons"
 import { Logo } from "@/components/Logo"
 import { categoryShortName, type StoreCategory } from "@/lib/catalog-nav"
 import { listStoreCategories } from "@/lib/medusa"
+
+/** Чуть дольше — меньше гонок со следующим символом */
+const LIVE_SEARCH_DEBOUNCE_MS = 520
 
 function accountLabel(customer: {
   first_name?: string | null
@@ -22,12 +25,110 @@ function accountLabel(customer: {
   return at > 0 ? email.slice(0, at) : email || "Кабинет"
 }
 
+function SiteHeaderSearch() {
+  const router = useRouter()
+  const pathname = usePathname()
+  const searchParams = useSearchParams()
+  const urlQ = searchParams.get("q") || ""
+  const [q, setQ] = useState(urlQ)
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const lastPushedRef = useRef(urlQ)
+  /** Пока печатаем — не затираем поле значением из URL после replace */
+  const focusedRef = useRef(false)
+
+  useEffect(() => {
+    if (focusedRef.current) return
+    setQ(urlQ)
+    lastPushedRef.current = urlQ
+  }, [urlQ])
+
+  function goSearch(raw: string, replace: boolean) {
+    const query = raw.trim()
+    const href = query
+      ? `/search?q=${encodeURIComponent(query)}`
+      : "/catalog"
+    const currentQ =
+      pathname === "/catalog" || pathname === "/search"
+        ? (searchParams.get("q") || "").trim()
+        : lastPushedRef.current
+    if (query === currentQ && (query || pathname === "/catalog")) return
+    lastPushedRef.current = query
+    if (replace) router.replace(href, { scroll: false })
+    else router.push(href)
+  }
+
+  function onSearch(e: FormEvent) {
+    e.preventDefault()
+    if (debounceRef.current) clearTimeout(debounceRef.current)
+    goSearch(q, false)
+  }
+
+  function onChange(value: string) {
+    setQ(value)
+    if (debounceRef.current) clearTimeout(debounceRef.current)
+    debounceRef.current = setTimeout(() => {
+      // В поле уже может быть длиннее — ищем по актуальному состоянию
+      goSearch(value, true)
+    }, LIVE_SEARCH_DEBOUNCE_MS)
+  }
+
+  function clearSearch() {
+    if (debounceRef.current) clearTimeout(debounceRef.current)
+    setQ("")
+    goSearch("", true)
+  }
+
+  useEffect(() => {
+    return () => {
+      if (debounceRef.current) clearTimeout(debounceRef.current)
+    }
+  }, [])
+
+  const hasQuery = q.trim().length > 0
+
+  return (
+    <form
+      className={`global-search${hasQuery ? " has-query" : ""}`}
+      onSubmit={onSearch}
+      role="search"
+    >
+      <input
+        name="q"
+        value={q}
+        onChange={(e) => onChange(e.target.value)}
+        onFocus={() => {
+          focusedRef.current = true
+        }}
+        onBlur={() => {
+          focusedRef.current = false
+        }}
+        placeholder="Поиск товара или артикула"
+        aria-label="Поиск по товарам"
+        autoComplete="off"
+      />
+      {hasQuery ? (
+        <button
+          type="button"
+          className="global-search-clear"
+          aria-label="Очистить поиск"
+          title="Очистить"
+          onClick={clearSearch}
+        >
+          <Icon name="x" />
+        </button>
+      ) : null}
+      <button type="submit" aria-label="Найти">
+        <Icon name="search" />
+        <span>Найти</span>
+      </button>
+    </form>
+  )
+}
+
 export function SiteHeader() {
   const { items } = useCart()
   const { customer } = useCustomer()
   const cartCount = items.reduce((sum, i) => sum + i.quantity, 0)
-  const router = useRouter()
-  const [q, setQ] = useState("")
   const [navOpen, setNavOpen] = useState(false)
   const [categories, setCategories] = useState<StoreCategory[]>([])
   const cabinetLabel = accountLabel(customer)
@@ -47,13 +148,6 @@ export function SiteHeader() {
     }
   }, [])
 
-  function onSearch(e: FormEvent) {
-    e.preventDefault()
-    const query = q.trim()
-    router.push(query ? `/search?q=${encodeURIComponent(query)}` : "/catalog")
-    setNavOpen(false)
-  }
-
   return (
     <header className="site-header">
       <div className="header-main frame">
@@ -64,20 +158,9 @@ export function SiteHeader() {
           <span>Каталог</span>
         </Link>
 
-        <form className="global-search" onSubmit={onSearch} role="search">
-          <input
-            name="q"
-            value={q}
-            onChange={(e) => setQ(e.target.value)}
-            placeholder="Поиск товара или артикула"
-            aria-label="Поиск по товарам"
-            autoComplete="off"
-          />
-          <button type="submit" aria-label="Найти">
-            <Icon name="search" />
-            <span>Найти</span>
-          </button>
-        </form>
+        <Suspense fallback={<form className="global-search" role="search"><input placeholder="Поиск товара или артикула" aria-label="Поиск по товарам" disabled /><button type="submit" disabled aria-label="Найти"><Icon name="search" /><span>Найти</span></button></form>}>
+          <SiteHeaderSearch />
+        </Suspense>
 
         <div className="header-icons">
           <Link

@@ -1285,6 +1285,125 @@ body {
 }
 .catalog-subcategory-links a:hover { background: #ffe373; }
 
+/* Запас под липкие фильтры при возврате к карточке */
+.catalog-return-pending .catalog-page {
+  visibility: hidden;
+}
+
+.catalog-products > .product-card {
+  scroll-margin-top: 120px;
+}
+
+@media (max-width: 700px) {
+  .catalog-products > .product-card {
+    scroll-margin-top: 160px;
+  }
+}
+
+.catalog-feed-sentinel {
+  height: 1px;
+  width: 100%;
+  pointer-events: none;
+}
+.catalog-feed-status {
+  min-height: 28px;
+  margin: 12px 0 4px;
+  text-align: center;
+  color: #666;
+  font-size: 14px;
+}
+.catalog-feed-error { color: #a33; }
+.catalog-feed-end { color: #888; }
+
+/* Крестик очистки в строке поиска (между вводом и «Найти») */
+.global-search-clear {
+  flex: 0 0 40px;
+  width: 40px;
+  height: 100%;
+  border: 0;
+  border-left: 0;
+  background: transparent;
+  color: #5c5f61;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  cursor: pointer;
+}
+.global-search-clear svg {
+  width: 16px;
+  height: 16px;
+}
+.global-search-clear:hover {
+  color: #17191a;
+  background: rgba(0, 0, 0, 0.04);
+}
+.global-search-clear:focus-visible {
+  outline: 2px solid #1877de;
+  outline-offset: -2px;
+}
+
+/* Кнопка «наверх» в каталоге */
+.scroll-to-top {
+  position: fixed;
+  right: 20px;
+  bottom: 24px;
+  z-index: 10001;
+  width: 48px;
+  height: 48px;
+  border: 1px solid #e3e5e1;
+  border-radius: 50%;
+  background: #ffd21a;
+  color: #17191a;
+  display: grid;
+  place-items: center;
+  box-shadow: 0 8px 22px rgba(23, 25, 26, 0.14);
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(10px);
+  transition: opacity 0.18s ease, transform 0.18s ease;
+}
+.scroll-to-top.is-visible {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateY(0);
+}
+.scroll-to-top:hover {
+  background: #f0bf07;
+}
+.scroll-to-top svg {
+  width: 22px;
+  height: 22px;
+}
+@media (max-width: 700px) {
+  .scroll-to-top {
+    right: 14px;
+    bottom: 18px;
+    width: 44px;
+    height: 44px;
+  }
+}
+
+/* Полоска «где мы в списке»: 100% = всего найдено (total). В body, поверх шапки */
+.catalog-scroll-progress {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 10000;
+  height: 5px;
+  pointer-events: none;
+  background: #ecece8;
+}
+.catalog-scroll-progress-fill {
+  display: block;
+  height: 100%;
+  width: 0;
+  min-width: 0;
+  background: #ffd21a;
+  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.12);
+  transition: width 90ms linear;
+}
+
 .catalog-aside-nav a:hover,
 .catalog-aside-nav a.active,
 .catalog-mobile-cats-list a:hover,

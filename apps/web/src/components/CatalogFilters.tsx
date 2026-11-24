@@ -21,7 +21,18 @@ const SORT_OPTIONS = [
 ]
 
 /** Фильтры: клик раскрывает панель прямо под кнопкой (десктоп и мобилка) */
-export function CatalogFilters({ count }: { count: number }) {
+export function CatalogFilters({
+  count,
+  total,
+}: {
+  count: number
+  /** Всего по API до клиентских фильтров; если нет — только «Показано: N» */
+  total?: number
+}) {
+  const countLabel =
+    typeof total === "number" && total > count
+      ? `Показано: ${count} из ${total}`
+      : `Показано: ${count}`
   const router = useRouter()
   const sp = useSearchParams()
   const [panelOpen, setPanelOpen] = useState(false)
@@ -132,7 +143,7 @@ export function CatalogFilters({ count }: { count: number }) {
             {toggle}
             {resetBtn}
           </div>
-          <span>Показано: {count}</span>
+          <span>{countLabel}</span>
         </div>
         {panelOpen ? (
           <div className="filters-toolbar" id="catalog-filter-fields">
@@ -146,7 +157,7 @@ export function CatalogFilters({ count }: { count: number }) {
         <div className="catalog-toolbar filters-mobile-bar">
           {toggle}
           {resetBtn}
-          <span className="filters-mobile-count">Показано: {count}</span>
+          <span className="filters-mobile-count">{countLabel}</span>
         </div>
         {panelOpen ? (
           <div

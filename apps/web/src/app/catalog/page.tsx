@@ -2,43 +2,26 @@ import Link from "next/link"
 import { Suspense } from "react"
 import { Breadcrumbs } from "@/components/Breadcrumbs"
 import { CatalogCategoryNav } from "@/components/CatalogCategoryNav"
-import { CatalogFilters } from "@/components/CatalogFilters"
-import { CatalogMobileCategories } from "@/components/CatalogMobileCategories"
+import { CatalogResults } from "@/components/CatalogResults"
 import { Icon } from "@/components/icons"
 import { PageIntro } from "@/components/PageIntro"
-import { ProductCard } from "@/components/ProductCard"
 import { categoryAncestors } from "@/lib/catalog-nav"
 import {
-  STORE_PRODUCT_FIELDS,
-  listStoreCategories,
-  medusa,
-  productInStock,
-  productPriceRub,
-  type StoreProduct,
-} from "@/lib/medusa"
-
-const SHOW_LIMIT = 96
-
-function sortCatalogProducts(
-  list: StoreProduct[],
-  sort: string | undefined
-): StoreProduct[] {
-  if (sort === "low") {
-    return [...list].sort((a, b) => productPriceRub(a) - productPriceRub(b))
-  }
-  if (sort === "high") {
-    return [...list].sort((a, b) => productPriceRub(b) - productPriceRub(a))
-  }
-  return list
-}
+  CATALOG_PAGE_SIZE,
+  applyCatalogFilters,
+  fetchCatalogPage,
+  isSearchQuery,
+} from "@/lib/catalog-products"
+import { listStoreCategories } from "@/lib/medusa"
 
 /** Ссылка на категорию с сохранением фильтров (наличие, цена, сортировка) */
 function catalogHref(
-  filters: { max?: string; sort?: string; stock?: string },
+  filters: { max?: string; sort?: string; stock?: string; q?: string },
   catHandle?: string | null
 ): string {
   const params = new URLSearchParams()
   if (catHandle) params.set("cat", catHandle)
+  if (filters.q) params.set("q", filters.q)
   if (filters.max && filters.max !== "any") params.set("max", filters.max)
   if (filters.sort && filters.sort !== "popular") params.set("sort", filters.sort)
   if (filters.stock === "in") params.set("stock", "in")
@@ -58,8 +41,9 @@ export default async function CatalogPage({
   }>
 }) {
   const sp = await searchParams
+  const rawQ = (sp.q || "").trim()
+  const shortQuery = Boolean(rawQ) && !isSearchQuery(rawQ)
   const filterState = { max: sp.max, sort: sp.sort, stock: sp.stock }
-  let products: StoreProduct[] = []
   let error = ""
   let categories: Awaited<ReturnType<typeof listStoreCategories>> = []
 
@@ -74,56 +58,59 @@ export default async function CatalogPage({
     categories.find((c) => c.id === sp.cat)
   const unavailableCategory = Boolean(sp.cat && !activeCat)
   const ancestors = categoryAncestors(categories, activeCat?.id)
-  const childCategories = categories.filter((category) => (category.parent_category_id || null) === (activeCat?.id || null))
+  const childCategories = categories.filter(
+    (category) =>
+      (category.parent_category_id || null) === (activeCat?.id || null)
+  )
+
+  let initialProducts: Awaited<
+    ReturnType<typeof fetchCatalogPage>
+  >["products"] = []
+  let initialTotal = 0
 
   try {
-    if (unavailableCategory) throw new Error("Этот раздел недоступен. Выберите другую категорию.")
-    // order по цене через Store API здесь невалиден — сортируем ниже по productPriceRub
-    const { products: list } = await medusa.store.product.list({
-      limit: SHOW_LIMIT,
-      q: sp.q || undefined,
-      category_id: activeCat ? [activeCat.id] : undefined,
-      fields: STORE_PRODUCT_FIELDS,
-    })
-    products = (list || []) as StoreProduct[]
-
-    // Фильтры на клиентской выборке: цена и наличие независимы от сортировки
-    if (sp.max && sp.max !== "any") {
-      const maxRub = Number(sp.max)
-      if (Number.isFinite(maxRub)) {
-        products = products.filter((p) => {
-          const price = productPriceRub(p)
-          return price > 0 && price <= maxRub
-        })
-      }
+    if (unavailableCategory) {
+      throw new Error("Этот раздел недоступен. Выберите другую категорию.")
     }
-    if (sp.stock === "in") {
-      products = products.filter((p) => productInStock(p))
+    if (!shortQuery) {
+      const page = await fetchCatalogPage({
+        q: rawQ || undefined,
+        categoryId: activeCat?.id,
+        offset: 0,
+        limit: CATALOG_PAGE_SIZE,
+      })
+      initialTotal = page.total
+      initialProducts = applyCatalogFilters(page.products, filterState)
     }
-
-    products = sortCatalogProducts(products, sp.sort)
   } catch (e) {
     error = (e as Error).message
   }
 
-  const title = sp.q
+  const title = rawQ
     ? "Результаты поиска"
-    : activeCat?.name || (unavailableCategory ? "Раздел недоступен" : "Каталог товаров")
-  const lead = sp.q
-    ? `По запросу «${sp.q}»`
+    : activeCat?.name ||
+      (unavailableCategory ? "Раздел недоступен" : "Каталог товаров")
+  const lead = rawQ
+    ? `По запросу «${rawQ}»`
     : "Выберите категорию и уточните параметры."
 
   return (
-    <div className="frame interior">
+    <div className="frame interior catalog-page">
       <Breadcrumbs
         items={[
           {
             label: "Каталог",
             href:
-              activeCat || sp.q ? catalogHref(filterState) : undefined,
+              activeCat || rawQ ? catalogHref(filterState) : undefined,
           },
-          ...ancestors.map((category, index) => ({ label: category.name, href: index < ancestors.length - 1 ? catalogHref(filterState, category.handle) : undefined })),
-          ...(sp.q && !activeCat ? [{ label: "Поиск" }] : []),
+          ...ancestors.map((category, index) => ({
+            label: category.name,
+            href:
+              index < ancestors.length - 1
+                ? catalogHref(filterState, category.handle)
+                : undefined,
+          })),
+          ...(rawQ && !activeCat ? [{ label: "Поиск" }] : []),
         ]}
       />
       <PageIntro eyebrow="Каталог" title={title} lead={lead} />
@@ -146,40 +133,49 @@ export default async function CatalogPage({
 
         <div className="catalog-content">
           {childCategories.length > 0 && (
-            <section className="catalog-subcategories" aria-label={activeCat ? "Подкатегории" : "Разделы каталога"}>
+            <section
+              className="catalog-subcategories"
+              aria-label={
+                activeCat ? "Подкатегории" : "Разделы каталога"
+              }
+            >
               <h2>{activeCat ? "Подкатегории" : "Разделы каталога"}</h2>
               <div className="catalog-subcategory-links">
-                {childCategories.map((category) => <Link key={category.id} href={catalogHref(filterState, category.handle)}>{category.name}</Link>)}
+                {childCategories.map((category) => (
+                  <Link
+                    key={category.id}
+                    href={catalogHref(filterState, category.handle)}
+                  >
+                    {category.name}
+                  </Link>
+                ))}
               </div>
             </section>
           )}
-          <div className="catalog-mobile-sticky">
-            <CatalogMobileCategories
-              categories={categories}
-              activeHandle={activeCat?.handle || sp.cat || null}
-              filters={filterState}
-            />
-            <Suspense fallback={null}>
-              <CatalogFilters count={products.length} />
-            </Suspense>
-          </div>
 
           {error ? (
-            <div className="empty-state">Не удалось загрузить каталог: {error}</div>
-          ) : products.length ? (
-            <div className="product-grid catalog-products">
-              {products.map((p) => (
-                <ProductCard key={p.id} product={p} />
-              ))}
+            <div className="empty-state">
+              Не удалось загрузить каталог: {error}
             </div>
           ) : (
-            <div className="blank-state">
-              <h2>Ничего не найдено</h2>
-              <p>Попробуйте другую категорию или сбросьте фильтры.</p>
-              <Link className="btn btn-primary" href={catalogHref(filterState)}>
-                Все товары
-              </Link>
-            </div>
+            <Suspense fallback={<div className="empty-state">Загружаем каталог…</div>}>
+              <CatalogResults
+                initialProducts={initialProducts}
+                initialTotal={initialTotal}
+                query={{
+                  q: rawQ || undefined,
+                  categoryId: activeCat?.id,
+                  max: sp.max,
+                  sort: sp.sort,
+                  stock: sp.stock,
+                }}
+                categories={categories}
+                activeHandle={activeCat?.handle || sp.cat || null}
+                filterState={filterState}
+                catalogHomeHref={catalogHref(filterState)}
+                shortQuery={shortQuery}
+              />
+            </Suspense>
           )}
         </div>
       </div>

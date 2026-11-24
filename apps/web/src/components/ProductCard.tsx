@@ -96,8 +96,16 @@ export function ProductCard({ product }: { product: StoreProduct }) {
   }
 
   return (
-    <article className="product-card">
-      <Link className="product-image" href={href} aria-label={`Открыть ${product.title}`}>
+    <article
+      className="product-card"
+      data-product-id={product.id}
+      data-product-handle={product.handle}
+    >
+      <Link
+        className="product-image"
+        href={href}
+        aria-label={`Открыть ${product.title}`}
+      >
         <Image
           src={img}
           alt={`Иллюстрация товара: ${product.title}`}

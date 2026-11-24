@@ -59,6 +59,7 @@ export type MoySkladProduct = {
 export type MoySkladStockRow = {
   meta?: { href?: string }
   stock: number
+  freeStock?: number
   reserve?: number
   inTransit?: number
   quantity?: number

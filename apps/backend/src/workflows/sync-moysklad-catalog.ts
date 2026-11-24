@@ -6,7 +6,6 @@ import {
 } from "@medusajs/framework/workflows-sdk"
 import {
   createProductsWorkflow,
-  linkSalesChannelsToStockLocationWorkflow,
   updateProductsWorkflow,
   upsertVariantPricesWorkflow,
 } from "@medusajs/medusa/core-flows"
@@ -20,6 +19,7 @@ import { ensureMoyskladCategories } from "../modules/moysklad/ensure-categories"
 import type MoySkladModuleService from "../modules/moysklad/service"
 import type { MoySkladProduct } from "../modules/moysklad/types"
 import type { MedusaContainer } from "@medusajs/framework/types"
+import { syncAllMoyskladStock } from "../modules/moysklad/stock-sync"
 
 /** Medusa 2 хранит цену в основных единицах валюты (рубли, не копейки) */
 function rubFromKopecks(kopecks: number): number {
@@ -34,6 +34,7 @@ type SyncResult = {
   imagesSynced: number
   stockUpdated: number
   stockUnchanged: number
+  hidden: number
   errors: string[]
 }
 
@@ -220,6 +221,7 @@ const syncProductsStep = createStep(
     let unchanged = 0
     let skipped = 0
     let imagesSynced = 0
+    let hidden = 0
     const errors: string[] = []
 
     const visibleSourceIds = new Set(products.map((product) => product.id))
@@ -232,6 +234,7 @@ const syncProductsStep = createStep(
         status: "draft",
         metadata: { ...product.metadata, moysklad_hidden: "1" },
       })
+      hidden += 1
     }
 
     for (const ms of products) {
@@ -542,6 +545,7 @@ const syncProductsStep = createStep(
       imagesSynced,
       stockUpdated: 0,
       stockUnchanged: 0,
+      hidden,
       errors,
     } satisfies SyncResult)
   }
@@ -551,147 +555,13 @@ const syncProductsStep = createStep(
 const syncStockStep = createStep(
   "moysklad-sync-stock",
   async (input: SyncResult, { container }) => {
-    const moysklad: MoySkladModuleService = container.resolve(MOYSKLAD_MODULE)
-    const productModule = container.resolve(Modules.PRODUCT)
-    const inventoryModule = container.resolve(Modules.INVENTORY)
-    const stockLocationModule = container.resolve(Modules.STOCK_LOCATION)
-
-    const { storeId } = await moysklad.resolveDefaults()
-    const client = moysklad.getClient()
-
-    let stockRows
-    try {
-      stockRows = await client.listStockByStore(storeId)
-    } catch {
-      stockRows = await client.listStockAll()
-    }
-
-    const locations = await stockLocationModule.listStockLocations({}, { take: 10 })
-    let location = locations[0]
-    if (!location) {
-      location = await stockLocationModule.createStockLocations({
-        name: "МойСклад",
-        metadata: { moysklad_store_id: storeId },
-      })
-    }
-
-    // Канал продаж обязан знать склад — иначе add-to-cart падает
-    const salesChannelModule = container.resolve(Modules.SALES_CHANNEL)
-    const channels = await salesChannelModule.listSalesChannels({}, { take: 1 })
-    if (channels[0]) {
-      await linkSalesChannelsToStockLocationWorkflow(container).run({
-        input: { id: location.id, add: [channels[0].id], remove: [] },
-      })
-    }
-
-    const link = container.resolve(ContainerRegistrationKeys.LINK)
-    const query = container.resolve(ContainerRegistrationKeys.QUERY)
-
-    const variantByMsId = new Map<
-      string,
-      Awaited<ReturnType<typeof productModule.listProductVariants>>[0]
-    >()
-    const variantPageSize = 500
-    for (let skip = 0; ; skip += variantPageSize) {
-      const page = await productModule.listProductVariants(
-        {},
-        { take: variantPageSize, skip }
-      )
-      for (const v of page) {
-        const msId = (v.metadata as Record<string, string> | null)?.moysklad_id
-        if (msId) variantByMsId.set(msId, v)
-      }
-      if (page.length < variantPageSize) break
-    }
-
-    // variant_id → inventory_item_id
-    const invLinkByVariant = new Map<string, string>()
-    {
-      const { data } = await query.graph({
-        entity: "product_variant_inventory_item",
-        fields: ["variant_id", "inventory_item_id"],
-        filters: {},
-      })
-      for (const row of data as Array<{
-        variant_id: string
-        inventory_item_id: string
-      }>) {
-        invLinkByVariant.set(row.variant_id, row.inventory_item_id)
-      }
-    }
-
-    let stockUpdated = 0
-    let stockUnchanged = 0
-    const errors = [...(input.errors || [])]
-
-    for (const row of stockRows) {
-      try {
-        const href = row.meta?.href
-        const assortmentId = row.assortmentId || client.extractIdFromHref(href)
-        if (!assortmentId) continue
-
-        const variant = variantByMsId.get(assortmentId)
-        if (!variant) continue
-
-        const qty = Math.max(0, Math.floor(row.stock ?? row.quantity ?? 0))
-
-        let inventoryItemId = invLinkByVariant.get(variant.id)
-        if (!inventoryItemId) {
-          const items = await inventoryModule.listInventoryItems(
-            { sku: variant.sku || undefined },
-            { take: 1 }
-          )
-          let item = items[0]
-          if (!item) {
-            item = await inventoryModule.createInventoryItems({
-              sku: variant.sku || assortmentId,
-              title: variant.title,
-              metadata: { moysklad_id: assortmentId },
-            })
-          }
-          await link.create({
-            [Modules.PRODUCT]: { variant_id: variant.id },
-            [Modules.INVENTORY]: { inventory_item_id: item.id },
-            data: { required_quantity: 1 },
-          })
-          inventoryItemId = item.id
-          invLinkByVariant.set(variant.id, item.id)
-        }
-
-        const levels = await inventoryModule.listInventoryLevels(
-          { inventory_item_id: inventoryItemId, location_id: location.id },
-          { take: 1 }
-        )
-        const current = levels[0]?.stocked_quantity
-        if (levels[0] && Number(current) === qty) {
-          stockUnchanged += 1
-          continue
-        }
-
-        if (levels[0]) {
-          await inventoryModule.updateInventoryLevels({
-            inventory_item_id: inventoryItemId,
-            location_id: location.id,
-            stocked_quantity: qty,
-          })
-        } else {
-          await inventoryModule.createInventoryLevels({
-            inventory_item_id: inventoryItemId,
-            location_id: location.id,
-            stocked_quantity: qty,
-          })
-        }
-        stockUpdated += 1
-      } catch (e) {
-        errors.push(`stock: ${(e as Error).message}`)
-      }
-    }
+    const stock = await syncAllMoyskladStock(container)
 
     return new StepResponse({
       ...input,
-      stockUpdated,
-      stockUnchanged,
-      errors,
+      stockUpdated: stock.stockUpdated,
+      stockUnchanged: stock.stockUnchanged,
+      errors: [...(input.errors || []), ...stock.errors],
     } satisfies SyncResult)
   }
 )
@@ -716,6 +586,7 @@ const emptySyncInputStep = createStep(
       imagesSynced: 0,
       stockUpdated: 0,
       stockUnchanged: 0,
+      hidden: 0,
       errors: [] as string[],
     } satisfies SyncResult)
   }

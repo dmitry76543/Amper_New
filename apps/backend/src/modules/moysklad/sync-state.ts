@@ -11,12 +11,15 @@ export type SyncRunResult = {
   imagesSynced?: number
   stockUpdated?: number
   stockUnchanged?: number
+  hidden?: number
   errors?: string[]
 }
 
 export type MoySkladSyncState = {
-  /** Интервал автосинка в минутах (1–1440) */
+  /** Интервал автосинка каталога в минутах (1–1440) */
   intervalMinutes: number
+  /** Страхующий интервал остатков в минутах (1–60) */
+  stockIntervalMinutes: number
   status: "idle" | "running" | "ok" | "error"
   trigger?: SyncTrigger
   startedAt?: string
@@ -24,12 +27,32 @@ export type MoySkladSyncState = {
   nextDueAt?: string
   result?: SyncRunResult
   error?: string
+  lastStockSyncAt?: string
+  /** Сколько длилась последняя страховка остатков, мс */
+  lastStockDurationMs?: number
+  stockRequestedAt?: string
+  stockError?: string
+  /** YYYY-MM-DD последнего ночного полного прогона */
+  nightlyDoneDate?: string
 }
 
 const DEFAULT_INTERVAL = 15
-/** Если «running» дольше — считаем прогон зависшим и разрешаем новый */
-const STALE_RUNNING_MS = 10 * 60 * 1000
-const STATE_FILE = path.join(process.env.MOYSKLAD_DATA_DIR || path.join(process.cwd(), "data"), "moysklad-sync-state.json")
+const DEFAULT_STOCK_INTERVAL = 2
+
+/**
+ * Файл статуса нельзя держать в apps/backend/data:
+ * medusa develop следит за этой папкой и при каждой записи перезапускает
+ * сервер — синк сам себя убивает.
+ */
+function resolveStateFile(): string {
+  if (process.env.MOYSKLAD_DATA_DIR) {
+    return path.join(process.env.MOYSKLAD_DATA_DIR, "moysklad-sync-state.json")
+  }
+  return path.join(process.cwd(), "..", ".amper-data", "moysklad-sync-state.json")
+}
+
+const STATE_FILE = resolveStateFile()
+const LEGACY_STATE_FILE = path.join(process.cwd(), "data", "moysklad-sync-state.json")
 
 let memory: MoySkladSyncState | null = null
 
@@ -38,26 +61,9 @@ function clampInterval(n: number): number {
   return Math.min(1440, Math.max(1, Math.round(n)))
 }
 
-/** Зависший running (падение процесса / долгий прогон) не должен блокировать синк */
-function clearStaleRunningIfNeeded(state: MoySkladSyncState): MoySkladSyncState {
-  if (state.status !== "running" || !state.startedAt) return state
-  const started = new Date(state.startedAt).getTime()
-  if (!Number.isFinite(started)) return state
-  if (Date.now() - started < STALE_RUNNING_MS) return state
-
-  const finishedAt = new Date().toISOString()
-  const next: MoySkladSyncState = {
-    ...state,
-    status: "error",
-    finishedAt,
-    error:
-      "Предыдущая синхронизация зависла (дольше 10 мин) и была сброшена. Запустите снова или дождитесь автосинка.",
-    nextDueAt: computeNextDueAt(finishedAt, state.intervalMinutes),
-  }
-  memory = next
-  writeDisk(next)
-  console.warn("[moysklad-sync] сброшен зависший status=running с", state.startedAt)
-  return next
+function clampStockInterval(n: number): number {
+  if (!Number.isFinite(n)) return DEFAULT_STOCK_INTERVAL
+  return Math.min(60, Math.max(1, Math.round(n)))
 }
 
 function ensureDir() {
@@ -65,25 +71,79 @@ function ensureDir() {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
 }
 
+/** Перенос старого файла из apps/backend/data, если новый ещё пуст */
+function migrateLegacyStateIfNeeded() {
+  try {
+    if (fs.existsSync(STATE_FILE) || !fs.existsSync(LEGACY_STATE_FILE)) return
+    ensureDir()
+    fs.copyFileSync(LEGACY_STATE_FILE, STATE_FILE)
+  } catch {
+    // перенос не критичен — дальше читаем как обычно
+  }
+}
+
 function readDisk(): MoySkladSyncState {
+  migrateLegacyStateIfNeeded()
   try {
     if (fs.existsSync(STATE_FILE)) {
-      const raw = JSON.parse(fs.readFileSync(STATE_FILE, "utf8")) as Partial<MoySkladSyncState>
+      const raw = JSON.parse(
+        fs.readFileSync(STATE_FILE, "utf8")
+      ) as Partial<MoySkladSyncState>
+      const intervalMinutes = clampInterval(
+        Number(raw.intervalMinutes ?? DEFAULT_INTERVAL)
+      )
+      const stockIntervalMinutes = clampStockInterval(
+        Number(raw.stockIntervalMinutes ?? DEFAULT_STOCK_INTERVAL)
+      )
+      // Если backend перезапустился при running, прежний процесс уже точно
+      // не работает. Не маскируем обрыв словом «ожидание».
+      if (raw.status === "running") {
+        const finishedAt = new Date().toISOString()
+        const interrupted: MoySkladSyncState = {
+          intervalMinutes,
+          stockIntervalMinutes,
+          status: "error",
+          trigger: raw.trigger,
+          startedAt: raw.startedAt,
+          finishedAt,
+          nextDueAt: computeNextDueAt(finishedAt, intervalMinutes),
+          result: raw.result,
+          lastStockSyncAt: raw.lastStockSyncAt,
+          lastStockDurationMs: raw.lastStockDurationMs,
+          stockRequestedAt: raw.stockRequestedAt,
+          stockError: raw.stockError,
+          nightlyDoneDate: raw.nightlyDoneDate,
+          error:
+            "Предыдущая синхронизация оборвалась при перезапуске backend. Запустите её снова.",
+        }
+        writeDisk(interrupted)
+        return interrupted
+      }
       return {
-        intervalMinutes: clampInterval(Number(raw.intervalMinutes ?? DEFAULT_INTERVAL)),
-        status: raw.status === "running" ? "idle" : raw.status || "idle",
+        intervalMinutes,
+        stockIntervalMinutes,
+        status: raw.status || "idle",
         trigger: raw.trigger,
         startedAt: raw.startedAt,
         finishedAt: raw.finishedAt,
         nextDueAt: raw.nextDueAt,
         result: raw.result,
         error: raw.error,
+        lastStockSyncAt: raw.lastStockSyncAt,
+        lastStockDurationMs: raw.lastStockDurationMs,
+        stockRequestedAt: raw.stockRequestedAt,
+        stockError: raw.stockError,
+        nightlyDoneDate: raw.nightlyDoneDate,
       }
     }
   } catch {
     // битый файл — начнём с дефолта
   }
-  return { intervalMinutes: DEFAULT_INTERVAL, status: "idle" }
+  return {
+    intervalMinutes: DEFAULT_INTERVAL,
+    stockIntervalMinutes: DEFAULT_STOCK_INTERVAL,
+    status: "idle",
+  }
 }
 
 function writeDisk(state: MoySkladSyncState) {
@@ -94,11 +154,12 @@ function writeDisk(state: MoySkladSyncState) {
 /** Текущее состояние синка (файл + память процесса) */
 export function getSyncState(): MoySkladSyncState {
   if (!memory) memory = readDisk()
-  memory = clearStaleRunningIfNeeded(memory)
   return { ...memory }
 }
 
-export function saveSyncState(patch: Partial<MoySkladSyncState>): MoySkladSyncState {
+export function saveSyncState(
+  patch: Partial<MoySkladSyncState>
+): MoySkladSyncState {
   const prev = getSyncState()
   memory = {
     ...prev,
@@ -106,9 +167,59 @@ export function saveSyncState(patch: Partial<MoySkladSyncState>): MoySkladSyncSt
     intervalMinutes: clampInterval(
       Number(patch.intervalMinutes ?? prev.intervalMinutes ?? DEFAULT_INTERVAL)
     ),
+    stockIntervalMinutes: clampStockInterval(
+      Number(
+        patch.stockIntervalMinutes ??
+          prev.stockIntervalMinutes ??
+          DEFAULT_STOCK_INTERVAL
+      )
+    ),
   }
   writeDisk(memory)
   return { ...memory }
+}
+
+/** Нужно ли выполнить страхующую сверку остатков */
+export function shouldRunStockSync(now = Date.now()): boolean {
+  const state = getSyncState()
+  if (state.status === "running") return false
+  if (state.stockRequestedAt) return true
+  if (!state.lastStockSyncAt) return true
+  const last = new Date(state.lastStockSyncAt).getTime()
+  if (!Number.isFinite(last)) return true
+  return now - last >= state.stockIntervalMinutes * 60_000
+}
+
+/** Webhook помечает остатки как требующие ближайшего обновления */
+export function requestStockSync(): MoySkladSyncState {
+  return saveSyncState({
+    stockRequestedAt: new Date().toISOString(),
+  })
+}
+
+export function markStockSyncOk(options?: {
+  finishedAt?: string
+  durationMs?: number
+}) {
+  const finishedAt = options?.finishedAt || new Date().toISOString()
+  const next = saveSyncState({
+    lastStockSyncAt: finishedAt,
+    lastStockDurationMs:
+      typeof options?.durationMs === "number"
+        ? Math.max(0, Math.round(options.durationMs))
+        : undefined,
+    stockError: undefined,
+  })
+  // Явно очищаем флаг webhook — иначе запрос будет крутиться вечно
+  if (memory) {
+    delete memory.stockRequestedAt
+    writeDisk(memory)
+  }
+  return { ...next, stockRequestedAt: undefined }
+}
+
+export function markStockSyncError(error: string) {
+  return saveSyncState({ stockError: error })
 }
 
 export function computeNextDueAt(
@@ -116,7 +227,8 @@ export function computeNextDueAt(
   intervalMinutes: number
 ): string {
   const base = fromIso ? new Date(fromIso).getTime() : Date.now()
-  const t = (Number.isFinite(base) ? base : Date.now()) + intervalMinutes * 60_000
+  const t =
+    (Number.isFinite(base) ? base : Date.now()) + intervalMinutes * 60_000
   return new Date(t).toISOString()
 }
 
@@ -165,6 +277,7 @@ export function markSyncOk(
     result,
     error: undefined,
     nextDueAt: computeNextDueAt(finishedAt, intervalMinutes),
+    lastStockSyncAt: finishedAt,
   })
 }
 

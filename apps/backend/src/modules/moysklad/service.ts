@@ -1,16 +1,23 @@
 import { MoySkladClient } from "./client"
 import type { MoySkladModuleOptions, MoySkladProduct } from "./types"
+import { MedusaService } from "@medusajs/framework/utils"
+import MoyskladOrderOutbox from "./models/order-outbox"
+import MoyskladSyncLock from "./models/sync-lock"
 
 /**
  * Сервис модуля МойСклад: клиент API и вспомогательные маппинги.
- * Без собственных таблиц — только интеграционный слой.
+ * Интеграционный клиент и постоянная очередь заказов.
  */
-class MoySkladModuleService {
+class MoySkladModuleService extends MedusaService({
+  MoyskladOrderOutbox,
+  MoyskladSyncLock,
+}) {
   protected options_: MoySkladModuleOptions
   protected client_: MoySkladClient | null = null
 
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   constructor(container: Record<string, unknown>, options: MoySkladModuleOptions) {
+    super(container)
     this.options_ = options || ({} as MoySkladModuleOptions)
   }
 

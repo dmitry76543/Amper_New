@@ -19,6 +19,7 @@ deploy/amvera/*.env
 
 # Локальный статус синка МойСклад
 apps/backend/data/
+.amper-data/
 
 # Загруженные фото товаров (File Module Medusa) — не в git
 apps/backend/static/

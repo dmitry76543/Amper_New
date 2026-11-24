@@ -1,13 +1,20 @@
 import type { MedusaRequest, MedusaResponse } from "@medusajs/framework/http"
-import { syncMoyskladCatalogWorkflow } from "../../../workflows/sync-moysklad-catalog"
 import { Modules } from "@medusajs/framework/utils"
 import { MOYSKLAD_MODULE } from "../../../modules/moysklad"
 import type MoySkladModuleService from "../../../modules/moysklad/service"
+import { requestStockSync } from "../../../modules/moysklad/sync-state"
+
+const STOCK_EVENT =
+  /customerorder|demand|supply|move|inventory|loss|enter|retailsalesreturn|salesreturn|purchasereturn|factureout|facturein|retaildemand|status/i
+
+const PRODUCT_EVENT = /product|variant|bundle|service|productfolder/i
 
 /**
  * Webhook / ручной триггер от МойСклад.
  * POST /hooks/moysklad
  * Заголовок X-Amper-Webhook-Secret (опционально, если задан MOYSKLAD_WEBHOOK_SECRET).
+ *
+ * Складские события только помечают остатки — полный каталог не гоняем.
  */
 export async function POST(req: MedusaRequest, res: MedusaResponse) {
   const moysklad: MoySkladModuleService = req.scope.resolve(MOYSKLAD_MODULE)
@@ -29,13 +36,15 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     .map((e) => e.meta?.type || e.action || "")
     .concat(body.type || "")
     .filter(Boolean)
+    .map((t) => String(t))
 
   const orderRelated = types.some((t) =>
-    /customerorder|demand|status/i.test(String(t))
+    /customerorder|demand|status/i.test(t)
   )
+  const stockRelated = types.some((t) => STOCK_EVENT.test(t))
+  const productRelated = types.some((t) => PRODUCT_EVENT.test(t))
 
   if (orderRelated) {
-    // Точечное обновление статусов через job-логику: полная сверка недавних заказов
     try {
       const orderModule = req.scope.resolve(Modules.ORDER)
       const client = moysklad.getClient()
@@ -64,12 +73,19 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
       res.status(500).json({ message: (e as Error).message })
       return
     }
-    res.status(200).json({ ok: true, mode: "orders" })
-    return
   }
 
-  const { result } = await syncMoyskladCatalogWorkflow(req.scope).run({})
-  res.status(200).json({ ok: true, mode: "catalog", result })
+  if (stockRelated || orderRelated) {
+    requestStockSync()
+  }
+
+  // Карточки/папки — только метка «нужен каталог» через обычный интервал;
+  // полный sync из webhook больше не запускаем (блокировал бы backend).
+  res.status(200).json({
+    ok: true,
+    mode: stockRelated || orderRelated ? "stock-marked" : "ack",
+    productRelated,
+  })
 }
 
 export async function GET(req: MedusaRequest, res: MedusaResponse) {

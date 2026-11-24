@@ -121,6 +121,34 @@ export class MoySkladClient {
     )
   }
 
+  /**
+   * Краткий доступный остаток, изменившийся после указанного момента.
+   * freeStock уже исключает резервы, но не добавляет ожидаемые поступления.
+   */
+  async listChangedFreeStock(
+    storeId: string,
+    changedSince?: string
+  ): Promise<MoySkladStockRow[]> {
+    const params = new URLSearchParams({
+      stockType: "freeStock",
+      filter: `storeId=${storeId}`,
+    })
+    if (changedSince) {
+      params.set(
+        "changedSince",
+        new Date(changedSince)
+          .toISOString()
+          .replace("T", " ")
+          .replace(/\.\d{3}Z$/, "")
+      )
+    } else {
+      params.set("include", "zeroLines")
+    }
+    return this.get<MoySkladStockRow[]>(
+      `/report/stock/all/current?${params.toString()}`
+    )
+  }
+
   /** The API excludes archived folders by default; explicitly read both sets. */
   async listProductFolders(): Promise<MoySkladProductFolder[]> {
     const active = await this.listAll<MoySkladProductFolder>("/entity/productfolder?filter=archived=false")
@@ -174,6 +202,15 @@ export class MoySkladClient {
       `/entity/customerorder`,
       payload
     )
+  }
+
+  /** Поиск заказа по постоянному ID Medusa — защита от повторного создания */
+  async findCustomerOrderByExternalCode(externalCode: string) {
+    const filter = encodeURIComponent(`externalCode=${externalCode}`)
+    const data = await this.get<
+      ListResponse<{ id: string; name: string; externalCode?: string }>
+    >(`/entity/customerorder?filter=${filter}&limit=1`)
+    return data.rows?.[0]
   }
 
   async getCustomerOrder(id: string) {

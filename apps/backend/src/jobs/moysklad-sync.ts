@@ -9,6 +9,10 @@ import {
   markSyncRunning,
   shouldRunScheduledSync,
 } from "../modules/moysklad/sync-state"
+import {
+  acquireSyncLock,
+  releaseSyncLock,
+} from "../modules/moysklad/sync-lock"
 
 /**
  * Тик каждую минуту: если пора по intervalMinutes — гоняем умный синк.
@@ -19,6 +23,9 @@ export default async function moyskladSyncJob(container: MedusaContainer) {
     return
   }
 
+  const lock = await acquireSyncLock(container, "catalog", 90 * 60 * 1000)
+  if (!lock) return
+
   const started = markSyncRunning("schedule")
   try {
     const { result } = await syncMoyskladCatalogWorkflow(container).run({})
@@ -27,6 +34,8 @@ export default async function moyskladSyncJob(container: MedusaContainer) {
   } catch (e) {
     markSyncError("schedule", started.startedAt, (e as Error).message)
     console.error("[job] moysklad catalog sync failed:", (e as Error).message)
+  } finally {
+    await releaseSyncLock(container, "catalog", lock)
   }
 
   // Подтягиваем статусы заказов, у которых есть moysklad_order_id
@@ -68,7 +77,10 @@ export default async function moyskladSyncJob(container: MedusaContainer) {
       })
     }
   } catch (e) {
-    console.error("[job] moysklad order status sync failed:", (e as Error).message)
+    console.error(
+      "[job] moysklad order status sync failed:",
+      (e as Error).message
+    )
   }
 }
 

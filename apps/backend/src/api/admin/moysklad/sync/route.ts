@@ -15,20 +15,31 @@ import {
   saveSyncState,
   computeNextDueAt,
 } from "../../../../modules/moysklad/sync-state"
+import {
+  acquireSyncLock,
+  releaseSyncLock,
+} from "../../../../modules/moysklad/sync-lock"
 
 function publicState() {
   const sync = getSyncState()
-  // Если nextDueAt ещё не посчитан — оценим от последнего финиша
   if (!sync.nextDueAt && sync.finishedAt) {
     sync.nextDueAt = computeNextDueAt(sync.finishedAt, sync.intervalMinutes)
   } else if (!sync.nextDueAt && sync.status !== "running") {
     sync.nextDueAt = computeNextDueAt(undefined, sync.intervalMinutes)
   }
-  return sync
+  const startedMs = sync.startedAt ? new Date(sync.startedAt).getTime() : NaN
+  const runningForMs =
+    sync.status === "running" && Number.isFinite(startedMs)
+      ? Math.max(0, Date.now() - startedMs)
+      : undefined
+  return {
+    ...sync,
+    runningForMs,
+  }
 }
 
 /**
- * GET /admin/moysklad/sync — статус + настройки интервала.
+ * GET /admin/moysklad/sync — статус + настройки интервалов.
  */
 export const GET = async (
   _req: AuthenticatedMedusaRequest,
@@ -38,8 +49,7 @@ export const GET = async (
 }
 
 /**
- * POST /admin/moysklad/sync — ручной запуск умного синка (фон).
- * Body (опционально): { intervalMinutes?: number } — только сохранить интервал.
+ * POST /admin/moysklad/sync — ручной запуск / настройки.
  */
 export const POST = async (
   req: AuthenticatedMedusaRequest,
@@ -47,24 +57,43 @@ export const POST = async (
 ) => {
   const body = (req.body || {}) as {
     intervalMinutes?: number
+    stockIntervalMinutes?: number
     action?: "sync" | "settings" | "force-align"
   }
 
-  // Сохранение только интервала
-  if (body.action === "settings" || (body.intervalMinutes && body.action !== "sync" && body.action !== "force-align")) {
-    if (body.intervalMinutes == null) {
-      res.status(400).json({ message: "Укажите intervalMinutes" })
-      return
-    }
-    const sync = saveSyncState({
-      intervalMinutes: body.intervalMinutes,
-      nextDueAt: computeNextDueAt(
+  if (
+    body.action === "settings" ||
+    ((body.intervalMinutes != null || body.stockIntervalMinutes != null) &&
+      body.action !== "sync" &&
+      body.action !== "force-align")
+  ) {
+    const patch: {
+      intervalMinutes?: number
+      stockIntervalMinutes?: number
+      nextDueAt?: string
+    } = {}
+    if (body.intervalMinutes != null) {
+      patch.intervalMinutes = body.intervalMinutes
+      patch.nextDueAt = computeNextDueAt(
         getSyncState().finishedAt || new Date().toISOString(),
         body.intervalMinutes
-      ),
-    })
+      )
+    }
+    if (body.stockIntervalMinutes != null) {
+      patch.stockIntervalMinutes = body.stockIntervalMinutes
+    }
+    if (
+      patch.intervalMinutes == null &&
+      patch.stockIntervalMinutes == null
+    ) {
+      res.status(400).json({
+        message: "Укажите intervalMinutes или stockIntervalMinutes",
+      })
+      return
+    }
+    const sync = saveSyncState(patch)
     res.json({
-      message: `Интервал автосинка: каждые ${sync.intervalMinutes} мин.`,
+      message: `Каталог: каждые ${sync.intervalMinutes} мин · остатки: каждые ${sync.stockIntervalMinutes} мин`,
       sync: publicState(),
     })
     return
@@ -80,6 +109,20 @@ export const POST = async (
 
   const forceAlign = body.action === "force-align"
   const scope = req.scope
+  const lockKey = forceAlign ? "stock" : "catalog"
+  const lock = await acquireSyncLock(
+    scope as never,
+    lockKey,
+    forceAlign ? 15 * 60 * 1000 : 90 * 60 * 1000
+  )
+  if (!lock) {
+    res.status(409).json({
+      message: "Синхронизация уже выполняется",
+      sync: publicState(),
+    })
+    return
+  }
+
   const started = markSyncRunning("manual")
 
   res.status(202).json({
@@ -93,7 +136,6 @@ export const POST = async (
     try {
       let reservationsCleared = 0
       if (forceAlign) {
-        // Крайний случай: сбрасываем локальные резервы Medusa, остатки берём из МС
         const { Modules } = await import("@medusajs/framework/utils")
         const inventoryModule = scope.resolve(Modules.INVENTORY) as {
           listReservationItems?: (
@@ -139,6 +181,8 @@ export const POST = async (
     } catch (e) {
       markSyncError("manual", started.startedAt, (e as Error).message)
       console.error("[admin] moysklad sync failed:", (e as Error).message)
+    } finally {
+      await releaseSyncLock(scope as never, lockKey, lock)
     }
   })()
 }

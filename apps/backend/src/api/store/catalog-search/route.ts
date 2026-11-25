@@ -4,6 +4,7 @@ import {
   MedusaError,
   ProductStatus,
 } from "@medusajs/framework/utils"
+import { buildNormTextSql, foldSearchLatin } from "./search-fold"
 
 type Body = {
   q?: string
@@ -27,13 +28,11 @@ function normalizeQuery(raw: unknown): string {
     .replace(/\s+/g, " ")
 }
 
-/** ё→е, й→и: частая путаница в русском наборе */
-function foldRussianLetters(value: string): string {
-  return value.replace(/ё/gi, "е").replace(/й/gi, "и")
-}
-
-/** Текст индекса: нижний регистр + ё→е + й→и */
-const NORM_TEXT = `replace(replace(lower("search_text"), 'ё', 'е'), 'й', 'и')`
+/**
+ * Текст индекса и запроса в одной латинице:
+ * «ВВГ» и handle `vvg` / «VVG» совпадают; «топоры» → topor…
+ */
+const NORM_TEXT = buildNormTextSql(`"search_text"`)
 
 /** Цифра «3» или код «А» — осмысленный кусок; короткий мусор отбрасываем */
 function isKeepableToken(token: string): boolean {
@@ -46,7 +45,7 @@ function isKeepableToken(token: string): boolean {
 function tokenize(q: string): string[] {
   const seen = new Set<string>()
   const out: string[] = []
-  for (const part of foldRussianLetters(q.toLowerCase()).split(/[\s,;|/]+/)) {
+  for (const part of foldSearchLatin(q).split(/[\s,;|/]+/)) {
     const token = part.trim()
     if (!isKeepableToken(token) || seen.has(token)) continue
     seen.add(token)
@@ -62,10 +61,10 @@ function escapeRegex(value: string): string {
 
 /**
  * С начала слова: «топор» и «топорище» — да, «стопор» — нет.
- * Буквы/цифры после fold (ё/й уже сведены).
+ * После foldSearchLatin в тексте только латиница/цифры.
  */
 function wordPrefixPattern(variant: string): string {
-  return `(^|[^a-zа-я0-9])${escapeRegex(variant)}`
+  return `(^|[^a-z0-9])${escapeRegex(variant)}`
 }
 
 /** ссверла → сверла (убрать удвоенные буквы) */
@@ -105,7 +104,7 @@ function isStrictToken(token: string): boolean {
 
 /** Soft-fuzzy только при явных удвоениях: ссверла, аавтомат */
 function allowFuzzyTypo(token: string): boolean {
-  if (isStrictToken(token) || !/^[a-zа-яё]+$/i.test(token)) return false
+  if (isStrictToken(token) || !/^[a-z]+$/i.test(token)) return false
   return collapseRepeats(token) !== token
 }
 

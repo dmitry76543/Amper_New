@@ -49,5 +49,6 @@ export function toCategoryHandle(name: string): string {
     .replace(/я/g, "ya")
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "")
-    .slice(0, 100) || "category"
+    .slice(0, 100)
+    .replace(/-+$/, "") || "category"
 }

@@ -49,8 +49,6 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
       const orderModule = req.scope.resolve(Modules.ORDER)
       const client = moysklad.getClient()
       const since = new Date(Date.now() - 2 * 60 * 60 * 1000)
-        .toISOString()
-        .replace(/\.\d{3}Z$/, ".000")
       const updated = await client.listCustomerOrdersUpdatedSince(since)
       for (const msOrder of updated) {
         if (!msOrder.externalCode) continue

@@ -45,8 +45,6 @@ export default async function moyskladSyncJob(container: MedusaContainer) {
     const client = moysklad.getClient()
 
     const since = new Date(Date.now() - 24 * 60 * 60 * 1000)
-      .toISOString()
-      .replace(/\.\d{3}Z$/, ".000")
     const updated = await client.listCustomerOrdersUpdatedSince(since)
 
     for (const msOrder of updated) {

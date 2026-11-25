@@ -6,6 +6,8 @@ import type {
   MoySkladStockRow,
 } from "./types"
 
+import { toMoySkladDateTime } from "./date-format"
+
 type ListResponse<T> = {
   meta?: { size?: number; limit?: number; offset?: number; nextHref?: string }
   rows: T[]
@@ -223,8 +225,8 @@ export class MoySkladClient {
     }>(`/entity/customerorder/${id}`)
   }
 
-  async listCustomerOrdersUpdatedSince(moment: string) {
-    const filter = encodeURIComponent(`updated>${moment}`)
+  async listCustomerOrdersUpdatedSince(moment: Date) {
+    const filter = encodeURIComponent(`updated>${toMoySkladDateTime(moment)}`)
     return this.listAll<{
       id: string
       name: string

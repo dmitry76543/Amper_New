@@ -90,7 +90,9 @@ function tokenVariants(token: string): string[] {
   if (/[0-9]/.test(token)) return out
 
   const collapsed = collapseRepeats(token)
-  push(collapsed)
+  // Не сжимаем ВВП/ВВГ → vp/vg: иначе «ВП-150», «ВПК» всплывают по «ВВП».
+  // ссверла→sverla (длиннее) — ок; порог 4 отсекает двух-трёхбуквенный мусор.
+  if (collapsed.length >= 4) push(collapsed)
   // «раств»(5) не режем; «сверла»(6)→«сверл» ещё можно
   if (collapsed.length >= 6) push(collapsed.slice(0, -1))
   if (collapsed.length >= 8) push(collapsed.slice(0, -2))
@@ -102,9 +104,14 @@ function isStrictToken(token: string): boolean {
   return /[0-9]/.test(token) || token.length < TYPO_MIN_TOKEN
 }
 
-/** Soft-fuzzy только при явных удвоениях: ссверла, аавтомат */
+/**
+ * Soft-fuzzy только при удвоениях в длинных словах: ссверла, аавтомат.
+ * Короткие коды вроде ШВВП→shvvp (две «v» из «ВВ») не считаем опечаткой:
+ * иначе word_similarity цепляет «швейной» (shveinoi).
+ */
 function allowFuzzyTypo(token: string): boolean {
   if (isStrictToken(token) || !/^[a-z]+$/i.test(token)) return false
+  if (token.length < 6) return false
   return collapseRepeats(token) !== token
 }
 
@@ -137,16 +144,36 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
 
   const knex = req.scope.resolve(ContainerRegistrationKeys.PG_CONNECTION)
 
-  // Medusa хранит версии: product_v1, product_v2… Берём самую новую.
-  const catalogList = rowsOf<{ table_name?: string; name?: string }>(
+  // Активная версия индекса (search_index.active_version), не «последнее имя».
+  // Иначе после swap/недособранной product_vN витрина может читать дырявую таблицу.
+  let catalogList = rowsOf<{ table_name?: string; name?: string }>(
     (await knex.raw(
-      `SELECT "name", "table_name"
-       FROM "${CATALOG_TABLE}"
-       WHERE "name" LIKE 'product%'
-       ORDER BY "name" DESC
+      `SELECT spi."name", spi."table_name"
+       FROM "search_index" si
+       INNER JOIN "search_index_version" siv
+         ON siv."search_index_id" = si."id"
+        AND siv."version" = si."active_version"
+        AND siv."deleted_at" IS NULL
+       INNER JOIN "${CATALOG_TABLE}" spi
+         ON spi."name" = siv."physical_name"
+       WHERE si."name" = 'product'
+         AND si."deleted_at" IS NULL
+         AND siv."status" = 'ready'
        LIMIT 1`
     )) as SqlResult<{ table_name?: string; name?: string }>
   )
+  if (!catalogList[0]?.table_name) {
+    // Запасной путь для старых схем без search_index
+    catalogList = rowsOf<{ table_name?: string; name?: string }>(
+      (await knex.raw(
+        `SELECT "name", "table_name"
+         FROM "${CATALOG_TABLE}"
+         WHERE "name" LIKE 'product%'
+         ORDER BY "name" DESC
+         LIMIT 1`
+      )) as SqlResult<{ table_name?: string; name?: string }>
+    )
+  }
   const tableName = String(catalogList[0]?.table_name || "").trim()
   if (!tableName || !/^[a-zA-Z0-9_]+$/.test(tableName)) {
     throw new MedusaError(
@@ -164,6 +191,12 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     for (const variant of variants) {
       params.push(wordPrefixPattern(variant))
       matchParts.push(`${NORM_TEXT} ~ ?`)
+      // Буквенный код ≥3: ещё и подстрока — «ВВП» находит «ШВВП», «ВВГ» → «ВВГнг».
+      // Не путать со сжатием vv→vp (его выше отключили): ищем сам введённый кусок.
+      if (/^[a-z]+$/i.test(variant) && variant.length >= 3) {
+        params.push(escapeRegex(variant))
+        matchParts.push(`${NORM_TEXT} ~ ?`)
+      }
     }
 
     if (allowFuzzyTypo(token)) {
@@ -194,14 +227,21 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
 
   const whereSql = whereParts.join(" AND ")
 
-  // Ранг: совпадение с начала слова по введённому куску
+  // Ранг: с начала слова выше, чем просто подстрока (ВВП внутри ШВВП)
   const rankParams: Array<string | number> = []
   const rankBits: string[] = []
   for (const token of tokens) {
     rankParams.push(wordPrefixPattern(token))
-    rankBits.push(
-      `(CASE WHEN ${NORM_TEXT} ~ ? THEN 1.0 ELSE 0.2 END)`
-    )
+    if (/^[a-z]+$/i.test(token) && token.length >= 3) {
+      rankParams.push(escapeRegex(token))
+      rankBits.push(
+        `(CASE WHEN ${NORM_TEXT} ~ ? THEN 1.0 WHEN ${NORM_TEXT} ~ ? THEN 0.7 ELSE 0.2 END)`
+      )
+    } else {
+      rankBits.push(
+        `(CASE WHEN ${NORM_TEXT} ~ ? THEN 1.0 ELSE 0.2 END)`
+      )
+    }
   }
   const rankSql = `(${rankBits.join(" + ")})`
 

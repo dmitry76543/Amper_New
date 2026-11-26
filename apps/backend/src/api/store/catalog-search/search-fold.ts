@@ -53,9 +53,53 @@ export function foldSearchLatin(value: string): string {
 /**
  * SQL-выражение той же свёртки для колонки search_text.
  * После fold граница слова — только латиница/цифры.
+ *
+ * Важно: не полагаемся на Postgres lower() для кириллицы — на Amvera
+ * (locale C) lower('Г') может остаться «Г», и «Гвозди» не находятся,
+ * тогда как строчные «винтовые»/«цинк» в том же названии находятся.
  */
 export function buildNormTextSql(columnSql = `"search_text"`): string {
-  let expr = `lower(${columnSql})`
+  let expr = columnSql
+  const upperToLower: Array<[string, string]> = [
+    ["А", "а"],
+    ["Б", "б"],
+    ["В", "в"],
+    ["Г", "г"],
+    ["Д", "д"],
+    ["Е", "е"],
+    ["Ё", "ё"],
+    ["Ж", "ж"],
+    ["З", "з"],
+    ["И", "и"],
+    ["Й", "й"],
+    ["К", "к"],
+    ["Л", "л"],
+    ["М", "м"],
+    ["Н", "н"],
+    ["О", "о"],
+    ["П", "п"],
+    ["Р", "р"],
+    ["С", "с"],
+    ["Т", "т"],
+    ["У", "у"],
+    ["Ф", "ф"],
+    ["Х", "х"],
+    ["Ц", "ц"],
+    ["Ч", "ч"],
+    ["Ш", "ш"],
+    ["Щ", "щ"],
+    ["Ъ", "ъ"],
+    ["Ы", "ы"],
+    ["Ь", "ь"],
+    ["Э", "э"],
+    ["Ю", "ю"],
+    ["Я", "я"],
+  ]
+  for (const [from, to] of upperToLower) {
+    expr = `replace(${expr}, '${from}', '${to}')`
+  }
+  // Латиница и прочий ASCII
+  expr = `lower(${expr})`
   const pairs: Array<[string, string]> = [
     ["ж", "zh"],
     ["х", "h"],

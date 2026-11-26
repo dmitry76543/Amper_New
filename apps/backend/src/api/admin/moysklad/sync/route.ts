@@ -171,7 +171,12 @@ export const POST = async (
         ...(result || {}),
         reservationsCleared: forceAlign ? reservationsCleared : undefined,
       }
-      markSyncOk("manual", started.startedAt, merged as never)
+      markSyncOk("manual", started.startedAt, merged as never, {
+        kind: forceAlign ? "force-align" : "catalog",
+        summary: forceAlign
+          ? "Выравнивание по МойСклад"
+          : "Синхронизация каталога",
+      })
       console.log(
         forceAlign
           ? "[admin] moysklad force-align ok:"
@@ -179,7 +184,12 @@ export const POST = async (
         merged
       )
     } catch (e) {
-      markSyncError("manual", started.startedAt, (e as Error).message)
+      markSyncError("manual", started.startedAt, (e as Error).message, {
+        kind: forceAlign ? "force-align" : "catalog",
+        summary: forceAlign
+          ? "Выравнивание по МойСклад"
+          : "Синхронизация каталога",
+      })
       console.error("[admin] moysklad sync failed:", (e as Error).message)
     } finally {
       await releaseSyncLock(scope as never, lockKey, lock)

@@ -32,14 +32,18 @@ export default async function moyskladNightlyJob(container: MedusaContainer) {
   const lock = await acquireSyncLock(container, "catalog", 90 * 60 * 1000)
   if (!lock) return
 
-  const started = markSyncRunning("schedule")
+  const started = markSyncRunning("nightly")
   try {
     const { result } = await syncMoyskladCatalogWorkflow(container).run({})
-    markSyncOk("schedule", started.startedAt, (result || {}) as never)
+    markSyncOk("nightly", started.startedAt, (result || {}) as never, {
+      summary: "Ночной полный синк каталога",
+    })
     saveSyncState({ nightlyDoneDate: today })
     console.log("[job] moysklad nightly full sync:", result)
   } catch (error) {
-    markSyncError("schedule", started.startedAt, (error as Error).message)
+    markSyncError("nightly", started.startedAt, (error as Error).message, {
+      summary: "Ночной полный синк каталога",
+    })
     console.error(
       "[job] moysklad nightly sync failed:",
       (error as Error).message

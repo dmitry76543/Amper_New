@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto"
 import { ContainerRegistrationKeys } from "@medusajs/framework/utils"
 import type { MedusaContainer } from "@medusajs/framework/types"
+import { getSyncState } from "./sync-state"
+import { getSearchReindexState } from "../search-reindex/state"
 
 type SqlClient = {
   raw: (
@@ -13,9 +15,44 @@ function rowsOf<T>(result: Array<T> | { rows?: Array<T> }): T[] {
   return Array.isArray(result) ? result : result.rows || []
 }
 
+/** Снимает lock без токена (осиротевшая блокировка после рестарта). */
+export async function forceReleaseSyncLock(
+  container: MedusaContainer,
+  key: string
+): Promise<void> {
+  const sql = container.resolve(
+    ContainerRegistrationKeys.PG_CONNECTION
+  ) as SqlClient
+  await sql.raw(
+    `
+    UPDATE moysklad_sync_lock
+    SET locked_until = NULL,
+        lock_token = NULL,
+        updated_at = NOW()
+    WHERE key = ?
+      AND deleted_at IS NULL
+    `,
+    [key]
+  )
+}
+
+/**
+ * true, если по файлу статуса видно: живого владельца lock уже нет.
+ * Иначе после kill/рестарта TTL (до 90 мин) молча блокирует автосинк.
+ */
+function shouldStealAbandonedLock(key: string): boolean {
+  if (key === "catalog") {
+    return getSyncState().status !== "running"
+  }
+  if (key === "search-reindex") {
+    return getSearchReindexState().status !== "running"
+  }
+  return false
+}
+
 /**
  * Берёт межпроцессную блокировку через PostgreSQL.
- * TTL защищает от зависшего процесса после рестарта.
+ * TTL защищает от зависшего процесса; осиротевший lock снимаем по статусу.
  */
 export async function acquireSyncLock(
   container: MedusaContainer,
@@ -41,6 +78,10 @@ export async function acquireSyncLock(
     )
   } catch {
     // запись уже есть
+  }
+
+  if (shouldStealAbandonedLock(key)) {
+    await forceReleaseSyncLock(container, key)
   }
 
   const claimed = await sql.raw(

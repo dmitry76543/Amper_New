@@ -1,0 +1,15 @@
+---
+description: Аккаунт GitHub и двухветный пуш для Amper_New
+alwaysApply: true
+---
+
+# Git / GitHub для этого проекта
+
+- Рабочий аккаунт для `git`/`gh` и пушей: **MultyKodAlexx** (не LiszaJuo, не dmitry76543).
+- Перед пушем проверять: `gh api user --jq .login` → должно быть `MultyKodAlexx`. Если активен другой — `gh auth switch -u MultyKodAlexx`.
+- Репозиторий: `KodBuster/Amper_New` (`origin`).
+- Две ветки деплоя Amvera:
+  - `main` — витрина (`amvera.yml` → web.Dockerfile, порт 3000)
+  - `deploy/backend` — Medusa (`amvera.yml` → backend.Dockerfile, порт 9000)
+- После коммита в `main`: merge в `deploy/backend` (не затирая backend-`amvera.yml`) и пуш **обеих** веток.
+- Форк `dmitry76543/Amper_New` — зеркало под вебхуки Amvera; с этой машины туда не пушить без явной просьбы.

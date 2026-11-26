@@ -106,6 +106,11 @@ export async function applyMoyskladStockRows(
             metadata: { moysklad_id: assortmentId },
           })
         }
+        if (typeof link?.create !== "function") {
+          throw new Error(
+            "Модуль связей Medusa (LINK) не инициализирован — перезапустите backend"
+          )
+        }
         await link.create({
           [Modules.PRODUCT]: { variant_id: variant.id },
           [Modules.INVENTORY]: { inventory_item_id: item.id },

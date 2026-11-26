@@ -7,6 +7,7 @@ import {
   Heading,
   Input,
   Label,
+  Prompt,
   Text,
   toast,
 } from "@medusajs/ui"
@@ -47,9 +48,29 @@ type SyncResponse = {
   sync: SyncState
 }
 
+type SearchReindexState = {
+  status: "idle" | "running" | "ok" | "error"
+  trigger?: "manual" | "schedule" | "cli"
+  startedAt?: string
+  finishedAt?: string
+  durationMs?: number
+  runningForMs?: number
+  indexes?: string[]
+  jobId?: string
+  error?: string
+  nightlyHour?: number
+  nightlyDoneDate?: string
+}
+
+type SearchReindexResponse = {
+  message?: string
+  searchReindex: SearchReindexState
+}
+
 const TRIGGER_LABEL: Record<string, string> = {
   manual: "вручную",
   schedule: "по расписанию",
+  nightly: "ночной",
   cli: "из консоли",
   webhook: "webhook",
 }
@@ -61,11 +82,16 @@ const LAST_RUN_LABEL: Record<string, string> = {
   error: "с ошибкой",
 }
 
+/** «В работе» — мягкий жёлтый, не путать с ошибкой (red) / orange Medusa */
+const BADGE_RUNNING_CLASS =
+  "!bg-yellow-400/15 !text-yellow-200 !border-yellow-500/35"
+
 const MoyskladPage = () => {
   const queryClient = useQueryClient()
   const [intervalDraft, setIntervalDraft] = useState("15")
   const [stockIntervalDraft, setStockIntervalDraft] = useState("2")
   const [nowTick, setNowTick] = useState(() => Date.now())
+  const [reindexConfirmOpen, setReindexConfirmOpen] = useState(false)
 
   const { data, isLoading } = useQuery({
     queryKey: ["moysklad-sync-status"],
@@ -73,7 +99,15 @@ const MoyskladPage = () => {
     refetchInterval: 3000,
   })
 
+  const { data: searchData, isLoading: searchLoading } = useQuery({
+    queryKey: ["moysklad-search-reindex"],
+    queryFn: () =>
+      sdk.client.fetch<SearchReindexResponse>("/admin/moysklad/search-reindex"),
+    refetchInterval: 3000,
+  })
+
   const sync = data?.sync
+  const searchReindex = searchData?.searchReindex
 
   useEffect(() => {
     if (sync?.intervalMinutes) {
@@ -87,12 +121,12 @@ const MoyskladPage = () => {
     }
   }, [sync?.stockIntervalMinutes])
 
-  // Живой таймер длительности, пока status=running
+  // Живой таймер длительности, пока sync или переиндексация running
   useEffect(() => {
-    if (sync?.status !== "running") return
+    if (sync?.status !== "running" && searchReindex?.status !== "running") return
     const id = window.setInterval(() => setNowTick(Date.now()), 1000)
     return () => window.clearInterval(id)
-  }, [sync?.status])
+  }, [sync?.status, searchReindex?.status])
 
   const runMutation = useMutation({
     mutationFn: () =>
@@ -142,10 +176,34 @@ const MoyskladPage = () => {
     },
   })
 
+  const searchReindexMutation = useMutation({
+    mutationFn: () =>
+      sdk.client.fetch<SearchReindexResponse>("/admin/moysklad/search-reindex", {
+        method: "POST",
+        body: {},
+      }),
+    onSuccess: (res) => {
+      toast.success(res.message || "Поисковый индекс пересобран")
+      queryClient.invalidateQueries({ queryKey: ["moysklad-search-reindex"] })
+    },
+    onError: (err: Error & { message?: string }) => {
+      const msg = err?.message || ""
+      toast.error(
+        !msg || /unknown error/i.test(msg)
+          ? "Не удалось запустить пересборку поиска"
+          : msg
+      )
+      queryClient.invalidateQueries({ queryKey: ["moysklad-search-reindex"] })
+    },
+  })
+
   const running =
     sync?.status === "running" ||
     runMutation.isPending ||
     forceAlignMutation.isPending
+
+  const searchRunning =
+    searchReindex?.status === "running" || searchReindexMutation.isPending
 
   const result = sync?.result
   const startedMs = sync?.startedAt ? new Date(sync.startedAt).getTime() : NaN
@@ -233,7 +291,9 @@ const MoyskladPage = () => {
               <Badge>загрузка…</Badge>
             ) : status === "running" ? (
               <div className="flex items-center gap-2 flex-wrap">
-                <Badge color="orange">синхронизация выполняется</Badge>
+                <Badge color="grey" className={BADGE_RUNNING_CLASS}>
+                  синхронизация выполняется
+                </Badge>
                 {sync?.trigger ? (
                   <Badge color="blue">
                     {TRIGGER_LABEL[sync.trigger] || sync.trigger}
@@ -259,7 +319,9 @@ const MoyskladPage = () => {
               {status === "running"
                 ? "Идёт обновление каталога, цен, фотографий и остатков из МойСклад."
                 : sync?.nextDueAt
-                  ? `Следующий автозапуск примерно: ${fmt(sync.nextDueAt)}`
+                  ? new Date(sync.nextDueAt).getTime() <= nowTick
+                    ? `Автозапуск просрочен с ${fmt(sync.nextDueAt)} — должен стартовать в ближайшую минуту.`
+                    : `Следующий автозапуск примерно: ${fmt(sync.nextDueAt)}`
                   : "Автозапуск ждёт ближайшего интервала."}
             </Text>
             {status === "running" && sync?.startedAt ? (
@@ -278,9 +340,10 @@ const MoyskladPage = () => {
                     ? "green"
                     : status === "error"
                       ? "red"
-                      : status === "running"
-                        ? "orange"
-                        : "grey"
+                      : "grey"
+                }
+                className={
+                  status === "running" ? BADGE_RUNNING_CLASS : undefined
                 }
               >
                 {LAST_RUN_LABEL[status]}
@@ -447,6 +510,126 @@ const MoyskladPage = () => {
             </ul>
           </div>
         ) : null}
+
+        <div className="rounded-lg border border-ui-border-base p-4 flex flex-col gap-4">
+          <div className="flex flex-col gap-2">
+            <Text weight="plus">Поисковый индекс витрины</Text>
+            <Text size="small" className="text-ui-fg-subtle">
+              Отдельно от синка МойСклад: заново заполняет поиск по всем товарам
+              в Medusa (strategy swap). Ночной запуск — около{" "}
+              {searchReindex?.nightlyHour ?? 5}:00, синк каталога — около 3:00.
+            </Text>
+          </div>
+          <div className="flex items-start justify-between gap-4 flex-wrap">
+            <Button
+              variant="secondary"
+              isLoading={searchRunning}
+              disabled={searchRunning}
+              onClick={() => setReindexConfirmOpen(true)}
+            >
+              <ArrowPath />
+              Пересобрать поиск
+            </Button>
+            <Prompt
+              open={reindexConfirmOpen}
+              onOpenChange={setReindexConfirmOpen}
+              variant="confirmation"
+            >
+              <Prompt.Content>
+                <Prompt.Header>
+                  <Prompt.Title>Пересобрать поисковый индекс?</Prompt.Title>
+                  <Prompt.Description className="whitespace-pre-line">
+                    {[
+                      "• не меняет товары и остатки",
+                      "• может занять несколько минут на большой базе",
+                      "• во время сборки витрина продолжает искать по старому индексу",
+                    ].join("\n")}
+                  </Prompt.Description>
+                </Prompt.Header>
+                <Prompt.Footer>
+                  <Prompt.Cancel>Отмена</Prompt.Cancel>
+                  <Prompt.Action
+                    onClick={() => {
+                      setReindexConfirmOpen(false)
+                      searchReindexMutation.mutate()
+                    }}
+                  >
+                    Пересобрать
+                  </Prompt.Action>
+                </Prompt.Footer>
+              </Prompt.Content>
+            </Prompt>
+            <div className="flex items-center gap-2 flex-wrap">
+              {searchLoading ? (
+                <Badge>загрузка…</Badge>
+              ) : searchReindex?.status === "running" ? (
+                <Badge color="grey" className={BADGE_RUNNING_CLASS}>
+                  переиндексация выполняется
+                </Badge>
+              ) : searchReindex?.status === "ok" ? (
+                <Badge color="green">последний раз успешно</Badge>
+              ) : searchReindex?.status === "error" ? (
+                <Badge color="red">последний раз с ошибкой</Badge>
+              ) : (
+                <Badge color="grey">ещё не запускали</Badge>
+              )}
+              {searchReindex?.trigger ? (
+                <Badge color="blue">
+                  {TRIGGER_LABEL[searchReindex.trigger] ||
+                    searchReindex.trigger}
+                </Badge>
+              ) : null}
+            </div>
+          </div>
+          {searchReindex?.status === "running" ? (
+            <Text size="small" className="text-ui-fg-subtle">
+              Начата: {searchReindex.startedAt ? fmt(searchReindex.startedAt) : "—"}
+              {typeof (searchReindex.runningForMs ??
+                (searchReindex.startedAt
+                  ? Math.max(0, nowTick - new Date(searchReindex.startedAt).getTime())
+                  : undefined)) === "number"
+                ? ` · уже ${fmtDuration(
+                    Number(
+                      searchReindex.runningForMs ??
+                        Math.max(
+                          0,
+                          nowTick - new Date(searchReindex.startedAt!).getTime()
+                        )
+                    )
+                  )}`
+                : ""}
+              . Дождитесь окончания — кнопка снова станет активной.
+            </Text>
+          ) : null}
+          {searchReindex?.startedAt && searchReindex.status !== "running" ? (
+            <Text size="small" className="text-ui-fg-subtle">
+              Начат: {fmt(searchReindex.startedAt)}
+              {searchReindex.finishedAt
+                ? ` · завершён: ${fmt(searchReindex.finishedAt)}`
+                : ""}
+              {typeof searchReindex.durationMs === "number"
+                ? ` · длился ${fmtDuration(searchReindex.durationMs)}`
+                : ""}
+              {searchReindex.indexes?.length
+                ? ` · индексы: ${searchReindex.indexes.join(", ")}`
+                : ""}
+            </Text>
+          ) : null}
+          {searchReindex?.nightlyDoneDate ? (
+            <Text size="small" className="text-ui-fg-subtle">
+              Ночной прогон отмечен за: {searchReindex.nightlyDoneDate}
+            </Text>
+          ) : (
+            <Text size="small" className="text-ui-fg-subtle">
+              Ночной прогон переиндексации ещё не отмечался.
+            </Text>
+          )}
+          {searchReindex?.status === "error" && searchReindex.error ? (
+            <Text size="small" className="text-ui-fg-error">
+              Причина: {searchReindex.error}
+            </Text>
+          ) : null}
+        </div>
       </div>
     </Container>
   )

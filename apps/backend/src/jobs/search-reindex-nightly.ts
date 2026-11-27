@@ -1,5 +1,6 @@
 import type { MedusaContainer } from "@medusajs/framework/types"
 import { runProductSearchReindex } from "../modules/search-reindex/run"
+import { invalidateSearchCache } from "../modules/search-cache"
 import {
   getSearchReindexState,
   saveSearchReindexState,
@@ -24,6 +25,9 @@ export default async function searchReindexNightlyJob(
   const result = await runProductSearchReindex(container, "schedule")
   if (result.ok) {
     saveSearchReindexState({ nightlyDoneDate: today })
+    // swap создаёт новую физическую таблицу — снимок в памяти должен
+    // пересобраться, иначе поиск будет читать удалённую версию индекса.
+    await invalidateSearchCache(container)
   }
   console.log("[job] search-reindex nightly:", result.message, {
     durationMs: result.state.durationMs,

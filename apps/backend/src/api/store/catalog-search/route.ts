@@ -4,7 +4,19 @@ import {
   MedusaError,
   ProductStatus,
 } from "@medusajs/framework/utils"
-import { buildNormTextSql, foldSearchLatin } from "./search-fold"
+import { buildNormTextSql } from "./search-fold"
+import {
+  ensureSearchCache,
+  searchInCache,
+} from "../../../modules/search-cache"
+import {
+  allowFuzzyTypo,
+  escapeRegex,
+  tokenize,
+  tokenVariants,
+  wordPrefixPattern,
+  TYPO_THRESHOLD,
+} from "../../../modules/search-cache/matcher"
 
 type Body = {
   q?: string
@@ -14,13 +26,6 @@ type Body = {
 
 const CATALOG_TABLE = "search_postgres_index"
 const MIN_TOKEN = 2
-/** Опечатки только для длинных «буквенных» кусков — иначе AND разъезжается */
-const TYPO_MIN_TOKEN = 4
-/**
- * Fuzzy только если в куске есть удвоение букв (ссверла).
- * На обычном «сверла» word_similarity сильно раздувает выдачу.
- */
-const TYPO_THRESHOLD = 0.4
 
 /**
  * Кэш активной таблицы индекса. Раньше на КАЖДЫЙ поиск уходило три JOIN
@@ -43,87 +48,6 @@ function normalizeQuery(raw: unknown): string {
  * «ВВГ» и handle `vvg` / «VVG» совпадают; «топоры» → topor…
  */
 const NORM_TEXT = buildNormTextSql(`"search_text"`)
-
-/** Цифра «3» или код «А» — осмысленный кусок; короткий мусор отбрасываем */
-function isKeepableToken(token: string): boolean {
-  if (!token) return false
-  if (/^\d+$/.test(token)) return true
-  return token.length >= MIN_TOKEN
-}
-
-/** Куски запроса: пробелы/запятые; цифры оставляем даже из 1 знака */
-function tokenize(q: string): string[] {
-  const seen = new Set<string>()
-  const out: string[] = []
-  for (const part of foldSearchLatin(q).split(/[\s,;|/]+/)) {
-    const token = part.trim()
-    if (!isKeepableToken(token) || seen.has(token)) continue
-    seen.add(token)
-    out.push(token)
-  }
-  return out
-}
-
-/** Экранирование спецсимволов для POSIX-regex */
-function escapeRegex(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
-}
-
-/**
- * С начала слова: «топор» и «топорище» — да, «стопор» — нет.
- * После foldSearchLatin в тексте только латиница/цифры.
- */
-function wordPrefixPattern(variant: string): string {
-  return `(^|[^a-z0-9])${escapeRegex(variant)}`
-}
-
-/** ссверла → сверла (убрать удвоенные буквы) */
-function collapseRepeats(token: string): string {
-  return token.replace(/(.)\1+/gi, "$1")
-}
-
-/**
- * Варианты куска: как ввели + без удвоений.
- * Обрезку окончания (сверла→сверл) только для длинных слов —
- * иначе «раств»→«раст» цепляет «растений».
- */
-function tokenVariants(token: string): string[] {
-  const seen = new Set<string>()
-  const out: string[] = []
-  const push = (value: string) => {
-    if (!isKeepableToken(value) || seen.has(value)) return
-    seen.add(value)
-    out.push(value)
-  }
-
-  push(token)
-  if (/[0-9]/.test(token)) return out
-
-  const collapsed = collapseRepeats(token)
-  // Не сжимаем ВВП/ВВГ → vp/vg: иначе «ВП-150», «ВПК» всплывают по «ВВП».
-  // ссверла→sverla (длиннее) — ок; порог 4 отсекает двух-трёхбуквенный мусор.
-  if (collapsed.length >= 4) push(collapsed)
-  // «раств»(5) не режем; «сверла»(6)→«сверл» ещё можно
-  if (collapsed.length >= 6) push(collapsed.slice(0, -1))
-  if (collapsed.length >= 8) push(collapsed.slice(0, -2))
-  return out
-}
-
-/** Цифры/артикулы не «угадываем» опечатками — только точная подстрока */
-function isStrictToken(token: string): boolean {
-  return /[0-9]/.test(token) || token.length < TYPO_MIN_TOKEN
-}
-
-/**
- * Soft-fuzzy только при удвоениях в длинных словах: ссверла, аавтомат.
- * Короткие коды вроде ШВВП→shvvp (две «v» из «ВВ») не считаем опечаткой:
- * иначе word_similarity цепляет «швейной» (shveinoi).
- */
-function allowFuzzyTypo(token: string): boolean {
-  if (isStrictToken(token) || !/^[a-z]+$/i.test(token)) return false
-  if (token.length < 6) return false
-  return collapseRepeats(token) !== token
-}
 
 type SqlResult<T> = { rows?: T[] } | T[]
 
@@ -203,6 +127,39 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
   const skip = Math.max(Number(body.pagination?.skip) || 0, 0)
   const categoryId = String(body.category_id || "").trim() || null
 
+  /**
+   * Основной путь — in-memory индекс.
+   * На 11.6k товарах это единицы миллисекунд против секунд в SQL:
+   * свёртка уже посчитана при сборке снимка, а не на каждый запрос.
+   */
+  const cache = await ensureSearchCache(req.scope)
+  const cached = cache
+    ? searchInCache(q, { categoryId, take, skip })
+    : null
+  if (cached) {
+    res.json({
+      results: [
+        {
+          hits: cached.hits.map((hit) => ({
+            id: hit.id,
+            score: hit.score,
+            document: { id: hit.id },
+          })),
+          metadata: {
+            count: cached.total,
+            skip,
+            take,
+            query: q,
+            tokens,
+            source: "memory",
+          },
+        },
+      ],
+    })
+    return
+  }
+
+  // Снимок ещё не готов (старт процесса) — считаем в SQL, чтобы витрина жила
   const knex = req.scope.resolve(
     ContainerRegistrationKeys.PG_CONNECTION
   ) as Knx

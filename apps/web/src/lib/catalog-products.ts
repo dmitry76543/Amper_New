@@ -1,5 +1,5 @@
 import {
-  STORE_PRODUCT_FIELDS,
+  STORE_CARD_FIELDS,
   medusa,
   productInStock,
   productPriceRub,
@@ -20,6 +20,8 @@ export type CatalogQuery = {
   stock?: string
   offset?: number
   limit?: number
+  /** Отмена: при быстром вводе старые поиски должны перестать занимать бэкенд */
+  signal?: AbortSignal
 }
 
 export type CatalogPageResult = {
@@ -89,7 +91,7 @@ async function loadProductsByIds(ids: string[]): Promise<StoreProduct[]> {
   const { products } = await medusa.store.product.list({
     id: ids,
     limit: ids.length,
-    fields: STORE_PRODUCT_FIELDS,
+    fields: STORE_CARD_FIELDS,
   })
   const byId = new Map(
     ((products || []) as StoreProduct[]).map((product) => [product.id, product])
@@ -112,6 +114,7 @@ async function searchProductsPage(
     // Свой маршрут: все куски запроса сразу + trigram-опечатки
     const data = (await medusa.client.fetch(`/store/catalog-search`, {
       method: "POST",
+      signal: query.signal,
       body: {
         q,
         category_id: query.categoryId || undefined,
@@ -133,7 +136,10 @@ async function searchProductsPage(
       offset,
       limit,
     }
-  } catch {
+  } catch (error) {
+    // Отменённый запрос — это не сбой: не ходим в запасной путь,
+    // иначе каждый брошенный символ запускал бы ещё и запрос к Medusa.
+    if (query.signal?.aborted) throw error
     // Без мягкого /store/search: typo_tolerance там размывает AND и пропускает лишнее.
     // Запас только list?q= (целые слова Medusa), пока не поднят catalog-search.
     const { products, count } = await medusa.store.product.list({
@@ -141,7 +147,7 @@ async function searchProductsPage(
       limit,
       offset,
       category_id: query.categoryId ? [query.categoryId] : undefined,
-      fields: STORE_PRODUCT_FIELDS,
+      fields: STORE_CARD_FIELDS,
     })
     return {
       products: (products || []) as StoreProduct[],
@@ -161,7 +167,7 @@ async function listProductsPage(
     limit,
     offset,
     category_id: query.categoryId ? [query.categoryId] : undefined,
-    fields: STORE_PRODUCT_FIELDS,
+    fields: STORE_CARD_FIELDS,
   })
   return {
     products: (products || []) as StoreProduct[],

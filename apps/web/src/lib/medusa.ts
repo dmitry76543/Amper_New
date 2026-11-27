@@ -48,6 +48,15 @@ export type StoreProduct = {
 export const STORE_PRODUCT_FIELDS =
   "+metadata,*variants,*variants.metadata,+variants.inventory_quantity,+variants.manage_inventory,+variants.allow_backorder,*images,*thumbnail"
 
+/**
+ * Облегчённый набор для сетки каталога и поиска: карточка показывает только
+ * первое фото и первый вариант, поэтому `*images` (все фото каждого товара)
+ * здесь лишний — на 48 товарах это заметный вес и время ответа.
+ * Для страницы товара остаётся полный STORE_PRODUCT_FIELDS.
+ */
+export const STORE_CARD_FIELDS =
+  "+metadata,*variants,+variants.inventory_quantity,+variants.manage_inventory,+variants.allow_backorder,*thumbnail"
+
 /** Остаток первого варианта; null — остаток не учитывается */
 export function productInventoryQty(
   product: StoreProduct | null | undefined
@@ -160,18 +169,49 @@ export function pricePerUomLabel(uom: string): string {
 
 export type StoreCategoryRow = StoreCategory
 
-/** Активные категории витрины (из папок МойСклад) */
-export async function listStoreCategories(rootsOnly = false): Promise<StoreCategoryRow[]> {
+/** Сколько живёт снимок дерева категорий (мс). Переопределяется CATEGORIES_CACHE_TTL_MS. */
+const CATEGORY_CACHE_TTL_MS = 5 * 60 * 1000
+
+/** Страховка от «зацикливания» пагинации, если count от бэкенда разошёлся с фактом */
+const CATEGORY_PAGE_LIMIT = 20
+
+/**
+ * Дерево категорий меняется раз в сутки (ночной синк МойСклад).
+ * Поэтому кэшируем полный список на процесс: раньше /catalog на КАЖДЫЙ рендер
+ * последовательно выкачивал все страницы, плюс отдельно это же делал хедер —
+ * на медленном бэкенде это давало десятки секунд ещё до самого поиска.
+ */
+let categoryCache: { at: number; all: StoreCategory[] } | null = null
+
+async function loadAllCategories(): Promise<StoreCategory[]> {
   const categories: StoreCategory[] = []
-  for (let offset = 0; ; offset += 100) {
+  for (let offset = 0, page = 0; page < CATEGORY_PAGE_LIMIT; page++, offset += 100) {
     const { product_categories, count } = await medusa.store.category.list({
-      limit: 100, offset,
+      limit: 100,
+      offset,
       fields: "id,name,handle,parent_category_id",
     })
-    const page = (product_categories || []) as StoreCategory[]
-    categories.push(...page)
-    if (page.length < 100 || (typeof count === "number" && categories.length >= count)) break
+    const chunk = (product_categories || []) as StoreCategory[]
+    categories.push(...chunk)
+    if (chunk.length < 100) break
+    if (typeof count === "number" && categories.length >= count) break
   }
-  const visible = visibleCategories(categories)
+  return categories
+}
+
+/** Активные категории витрины (из папок МойСклад) */
+export async function listStoreCategories(rootsOnly = false): Promise<StoreCategoryRow[]> {
+  const now = Date.now()
+  const ttl = Number(process.env.CATEGORIES_CACHE_TTL_MS) || CATEGORY_CACHE_TTL_MS
+  if (!categoryCache || now - categoryCache.at > ttl) {
+    try {
+      categoryCache = { at: now, all: await loadAllCategories() }
+    } catch (error) {
+      // Отдаём прошлый снимок, если сеть/бэкенд подвели — лучше старое меню, чем пустое
+      if (!categoryCache) throw error
+      categoryCache = { ...categoryCache, at: now }
+    }
+  }
+  const visible = visibleCategories(categoryCache.all)
   return rootsOnly ? visible.filter((category) => !category.parent_category_id) : visible
 }

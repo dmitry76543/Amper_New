@@ -22,6 +22,16 @@ const TYPO_MIN_TOKEN = 4
  */
 const TYPO_THRESHOLD = 0.4
 
+/**
+ * Кэш активной таблицы индекса. Раньше на КАЖДЫЙ поиск уходило три JOIN
+ * по служебным таблицам, хотя версия меняется раз в сутки (ночная пересборка).
+ * Держим имя/таблицу в памяти процесса и перепроверяем раз в минуту.
+ */
+const ACTIVE_INDEX_TTL_MS = 60_000
+let activeIndexCache:
+  | { name: string; tableName: string; expiresAt: number }
+  | null = null
+
 function normalizeQuery(raw: unknown): string {
   return String(raw || "")
     .trim()
@@ -121,6 +131,60 @@ function rowsOf<T>(result: SqlResult<T>): T[] {
   return Array.isArray(result) ? result : result.rows || []
 }
 
+type Knx = {
+  raw: (sql: string, params?: unknown[]) => Promise<unknown>
+}
+
+/**
+ * Активная версия индекса (search_index.active_version), не «последнее имя».
+ * Иначе после swap/недособранной product_vN витрина может читать дырявую таблицу.
+ */
+async function resolveActiveTable(knex: Knx): Promise<string> {
+  if (activeIndexCache && activeIndexCache.expiresAt > Date.now()) {
+    return activeIndexCache.tableName
+  }
+
+  let rows = rowsOf<{ table_name?: string }>(
+    (await knex.raw(
+      `SELECT spi."name", spi."table_name"
+       FROM "search_index" si
+       INNER JOIN "search_index_version" siv
+         ON siv."search_index_id" = si."id"
+        AND siv."version" = si."active_version"
+        AND siv."deleted_at" IS NULL
+       INNER JOIN "${CATALOG_TABLE}" spi
+         ON spi."name" = siv."physical_name"
+       WHERE si."name" = 'product'
+         AND si."deleted_at" IS NULL
+         AND siv."status" = 'ready'
+       LIMIT 1`
+    )) as SqlResult<{ table_name?: string }>
+  )
+
+  if (!rows[0]?.table_name) {
+    // Запасной путь для старых схем без search_index
+    rows = rowsOf<{ table_name?: string }>(
+      (await knex.raw(
+        `SELECT "name", "table_name"
+         FROM "${CATALOG_TABLE}"
+         WHERE "name" LIKE 'product%'
+         ORDER BY "name" DESC
+         LIMIT 1`
+      )) as SqlResult<{ table_name?: string }>
+    )
+  }
+
+  const tableName = String(rows[0]?.table_name || "").trim()
+  if (tableName && /^[a-zA-Z0-9_]+$/.test(tableName)) {
+    activeIndexCache = {
+      name: tableName,
+      tableName,
+      expiresAt: Date.now() + ACTIVE_INDEX_TTL_MS,
+    }
+  }
+  return tableName
+}
+
 /**
  * Умный поиск витрины: все куски слова должны совпасть (AND),
  * плюс опечатки через pg_trgm word_similarity.
@@ -135,47 +199,16 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     return
   }
 
-  const take = Math.min(
-    Math.max(Number(body.pagination?.take) || 48, 1),
-    100
-  )
+  const take = Math.min(Math.max(Number(body.pagination?.take) || 48, 1), 100)
   const skip = Math.max(Number(body.pagination?.skip) || 0, 0)
   const categoryId = String(body.category_id || "").trim() || null
 
-  const knex = req.scope.resolve(ContainerRegistrationKeys.PG_CONNECTION)
+  const knex = req.scope.resolve(
+    ContainerRegistrationKeys.PG_CONNECTION
+  ) as Knx
 
-  // Активная версия индекса (search_index.active_version), не «последнее имя».
-  // Иначе после swap/недособранной product_vN витрина может читать дырявую таблицу.
-  let catalogList = rowsOf<{ table_name?: string; name?: string }>(
-    (await knex.raw(
-      `SELECT spi."name", spi."table_name"
-       FROM "search_index" si
-       INNER JOIN "search_index_version" siv
-         ON siv."search_index_id" = si."id"
-        AND siv."version" = si."active_version"
-        AND siv."deleted_at" IS NULL
-       INNER JOIN "${CATALOG_TABLE}" spi
-         ON spi."name" = siv."physical_name"
-       WHERE si."name" = 'product'
-         AND si."deleted_at" IS NULL
-         AND siv."status" = 'ready'
-       LIMIT 1`
-    )) as SqlResult<{ table_name?: string; name?: string }>
-  )
-  if (!catalogList[0]?.table_name) {
-    // Запасной путь для старых схем без search_index
-    catalogList = rowsOf<{ table_name?: string; name?: string }>(
-      (await knex.raw(
-        `SELECT "name", "table_name"
-         FROM "${CATALOG_TABLE}"
-         WHERE "name" LIKE 'product%'
-         ORDER BY "name" DESC
-         LIMIT 1`
-      )) as SqlResult<{ table_name?: string; name?: string }>
-    )
-  }
-  const tableName = String(catalogList[0]?.table_name || "").trim()
-  if (!tableName || !/^[a-zA-Z0-9_]+$/.test(tableName)) {
+  const tableName = await resolveActiveTable(knex)
+  if (!tableName) {
     throw new MedusaError(
       MedusaError.Types.NOT_FOUND,
       "Индекс товаров для поиска ещё не готов"
@@ -190,42 +223,26 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     const matchParts: string[] = []
     for (const variant of variants) {
       params.push(wordPrefixPattern(variant))
-      matchParts.push(`${NORM_TEXT} ~ ?`)
+      matchParts.push(`n.search_norm ~ ?`)
       // Буквенный код ≥3: ещё и подстрока — «ВВП» находит «ШВВП», «ВВГ» → «ВВГнг».
       // Не путать со сжатием vv→vp (его выше отключили): ищем сам введённый кусок.
       if (/^[a-z]+$/i.test(variant) && variant.length >= 3) {
         params.push(escapeRegex(variant))
-        matchParts.push(`${NORM_TEXT} ~ ?`)
+        matchParts.push(`n.search_norm ~ ?`)
       }
     }
 
     if (allowFuzzyTypo(token)) {
       params.push(token)
       tokenClauses.push(
-        `((${matchParts.join(" OR ")}) OR word_similarity(?, ${NORM_TEXT}) > ${TYPO_THRESHOLD})`
+        `((${matchParts.join(" OR ")}) OR word_similarity(?, n.search_norm) > ${TYPO_THRESHOLD})`
       )
     } else {
-      tokenClauses.push(
-        matchParts.length === 1
-          ? `(${matchParts[0]})`
-          : `((${matchParts.join(" OR ")}))`
-      )
+      tokenClauses.push(`((${matchParts.join(" OR ")}))`)
     }
   }
 
-  const whereParts = [
-    `("indexed"->>'status' = ?)`,
-    ...tokenClauses,
-  ]
-  params.unshift(ProductStatus.PUBLISHED)
-
-  if (categoryId) {
-    // category_ids — массив в indexed; @> ищет вхождение id
-    params.push(JSON.stringify({ category_ids: [categoryId] }))
-    whereParts.push(`("indexed" @> ?::jsonb)`)
-  }
-
-  const whereSql = whereParts.join(" AND ")
+  const whereSql = tokenClauses.join(" AND ")
 
   // Ранг: с начала слова выше, чем просто подстрока (ВВП внутри ШВВП)
   const rankParams: Array<string | number> = []
@@ -235,36 +252,60 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     if (/^[a-z]+$/i.test(token) && token.length >= 3) {
       rankParams.push(escapeRegex(token))
       rankBits.push(
-        `(CASE WHEN ${NORM_TEXT} ~ ? THEN 1.0 WHEN ${NORM_TEXT} ~ ? THEN 0.7 ELSE 0.2 END)`
+        `(CASE WHEN n.search_norm ~ ? THEN 1.0 WHEN n.search_norm ~ ? THEN 0.7 ELSE 0.2 END)`
       )
     } else {
-      rankBits.push(
-        `(CASE WHEN ${NORM_TEXT} ~ ? THEN 1.0 ELSE 0.2 END)`
-      )
+      rankBits.push(`(CASE WHEN n.search_norm ~ ? THEN 1.0 ELSE 0.2 END)`)
     }
   }
   const rankSql = `(${rankBits.join(" + ")})`
 
-  const countRows = rowsOf<{ count?: number }>(
-    (await knex.raw(
-      `SELECT COUNT(*)::int AS count
-       FROM "${tableName}"
-       WHERE ${whereSql}`,
-      params
-    )) as SqlResult<{ count?: number }>
-  )
-  const count = Number(countRows[0]?.count || 0)
+  /**
+   * Параметры в порядке появления в тексте SQL:
+   * CTE (статус, категория) → ранжирование → условия WHERE → LIMIT/OFFSET.
+   */
+  const cteParams: Array<string | number> = [
+    JSON.stringify({ status: ProductStatus.PUBLISHED }),
+  ]
+  let cteFilter = `"indexed" @> ?::jsonb`
+  if (categoryId) {
+    // category_ids — массив в indexed; @> ищет вхождение id
+    cteParams.push(JSON.stringify({ category_ids: [categoryId] }))
+    cteFilter += ` AND "indexed" @> ?::jsonb`
+  }
 
-  // В SQL сначала выражения score (?), потом WHERE (?), затем LIMIT/OFFSET
-  const listParams = [...rankParams, ...params, take, skip]
+  const listParams = [
+    ...cteParams,
+    ...rankParams,
+    ...params,
+    take,
+    skip,
+  ]
+
+  /**
+   * MATERIALIZED — принципиально: свёртка считается ОДИН раз на строку.
+   * Без него Postgres «разворачивает» подзапрос и повторяет translate/replace
+   * в каждом условии и в ранжировании (до 6 копий на токен).
+   * Фильтр статуса остаётся внутри CTE в форме `@>`, чтобы сработал GIN
+   * "…_indexed_idx" (jsonb_path_ops) и до свёртки дошло меньше строк.
+   *
+   * COUNT(*) OVER () даёт полное число совпадений в том же проходе —
+   * раньше рядом выполнялся отдельный SELECT COUNT(*) с тем же тяжёлым WHERE.
+   */
   const listRows = rowsOf<{
     id?: string
     document?: { id?: string } | string
     score?: number
+    total?: number
   }>(
     (await knex.raw(
-      `SELECT "id", "document", ${rankSql} AS score
-       FROM "${tableName}"
+      `WITH n AS MATERIALIZED (
+         SELECT "id", "document", ${NORM_TEXT} AS search_norm
+         FROM "${tableName}"
+         WHERE ${cteFilter}
+       )
+       SELECT "id", "document", ${rankSql} AS score, COUNT(*) OVER () AS total
+       FROM n
        WHERE ${whereSql}
        ORDER BY score DESC, "id" ASC
        LIMIT ? OFFSET ?`,
@@ -273,6 +314,7 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
       id?: string
       document?: { id?: string } | string
       score?: number
+      total?: number
     }>
   )
 
@@ -288,6 +330,9 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
       document: { id },
     }
   })
+
+  // При пустой выдаче строк нет — значит и совпадений нет.
+  const count = listRows.length ? Number(listRows[0]?.total || 0) : 0
 
   res.json({
     results: [

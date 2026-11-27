@@ -10,8 +10,13 @@ import { Logo } from "@/components/Logo"
 import { categoryShortName, type StoreCategory } from "@/lib/catalog-nav"
 import { listStoreCategories } from "@/lib/medusa"
 
-/** Чуть дольше — меньше гонок со следующим символом */
-const LIVE_SEARCH_DEBOUNCE_MS = 520
+/**
+ * Пауза перед live-поиском. Раньше было 520 мс: при медленном бэкенде
+ * пользователь успевал набрать 5–6 символов, и пять запросов по 10 с
+ * наслаивались друг на друга. Отдельно от этого — Enter и кнопка «Найти»
+ * срабатывают сразу.
+ */
+const LIVE_SEARCH_DEBOUNCE_MS = 800
 
 function accountLabel(customer: {
   first_name?: string | null

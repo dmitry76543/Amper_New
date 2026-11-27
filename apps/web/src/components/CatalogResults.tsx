@@ -156,6 +156,8 @@ export function CatalogResults({
       initialProducts.length < CATALOG_PAGE_SIZE
   )
   const [error, setError] = useState("")
+  /** Отмена догрузки при смене запроса: иначе старый поиск держит бэкенд */
+  const abortRef = useRef<AbortController | null>(null)
   const [restoring, setRestoring] = useState(() =>
     needsCatalogRestore(pendingRestoreRef.current)
   )
@@ -202,6 +204,10 @@ export function CatalogResults({
         initialProducts.length < CATALOG_PAGE_SIZE
     )
     setError("")
+    // Прошлая догрузка относится к прежнему запросу — отменяем
+    abortRef.current?.abort()
+    abortRef.current = null
+    loadingRef.current = false
     pendingRestoreRef.current = pending
     setRestoring(needRestore)
     allowPersistRef.current = !needRestore
@@ -243,11 +249,15 @@ export function CatalogResults({
     loadingRef.current = true
     setLoading(true)
     setError("")
+    const controller = new AbortController()
+    abortRef.current?.abort()
+    abortRef.current = controller
     try {
       const page = await fetchCatalogPage({
         ...query,
         offset,
         limit: CATALOG_PAGE_SIZE,
+        signal: controller.signal,
       })
       const filtered = applyCatalogFilters(page.products, {
         max: query.max,
@@ -265,7 +275,10 @@ export function CatalogResults({
         setExhausted(true)
       }
     } catch (e) {
-      setError((e as Error).message || "Не удалось подгрузить товары")
+      // Отмена при смене фильтров/запроса — не ошибка для пользователя
+      if (!controller.signal.aborted) {
+        setError((e as Error).message || "Не удалось подгрузить товары")
+      }
     } finally {
       loadingRef.current = false
       setLoading(false)

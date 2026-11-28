@@ -61,7 +61,7 @@ export default async function HomePage() {
   }
   return (
     <>
-      <section className="hero-section">
+      <section className="hero-section hero-refresh">
         <div className="frame hero-grid">
           <div className="hero-copy">
             <div className="hero-overline">
@@ -94,13 +94,6 @@ export default async function HomePage() {
                 <Icon name="check" /> Для профессиональных задач
               </span>
             </div>
-          </div>
-          {/* Фото героя задаётся фоном в amper-v14.css; декоративные слои скрыты стилями v14.2 */}
-          <div className="hero-art" aria-hidden="true">
-            <div className="art-orbit" />
-            <div className="art-grid" />
-            <span className="art-large-number">220</span>
-            <span className="art-brand">AMPER / ELECTRIC GOODS</span>
           </div>
         </div>
       </section>

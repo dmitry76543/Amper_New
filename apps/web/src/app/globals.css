@@ -2125,3 +2125,56 @@ body {
     height: 32px;
   }
 }
+
+/* New responsive hero artwork: independent compositions for desktop/tablet/mobile. */
+.hero-section.hero-refresh {
+  position: relative;
+  isolation: isolate;
+  background: #ffe000 !important;
+}
+.hero-refresh::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background: url("/assets/amper-hero-desktop.webp") right center / auto 100% no-repeat;
+  mask-image: linear-gradient(90deg, transparent 0%, transparent 19%, #000 63%);
+}
+.hero-refresh .hero-grid {
+  display: block !important;
+  min-height: clamp(550px, 42vw, 715px) !important;
+}
+.hero-refresh .hero-copy {
+  width: 46%;
+  padding: clamp(42px, 5vw, 78px) 0 !important;
+}
+.hero-refresh .hero-copy h1 {
+  font-size: clamp(46px, 5vw, 74px) !important;
+  text-wrap: balance;
+}
+@media (min-width: 601px) and (max-width: 900px) {
+  .hero-refresh::before {
+    background-image: linear-gradient(90deg, #ffe000 0%, #ffe000 35%, transparent 78%), url("/assets/amper-hero-tablet.webp");
+    background-size: cover;
+    background-position: center;
+    mask-image: none;
+  }
+  .hero-refresh .hero-grid { min-height: 620px !important; }
+  .hero-refresh .hero-copy { width: 54%; padding: 34px 0 160px !important; }
+  .hero-refresh .hero-copy h1 { font-size: clamp(37px, 5.7vw, 54px) !important; }
+}
+@media (max-width: 600px) {
+  .hero-refresh::before {
+    background-image: url("/assets/amper-hero-mobile.webp");
+    background-size: cover;
+    background-position: center bottom;
+    mask-image: none;
+  }
+  .hero-refresh .hero-grid { min-height: 0 !important; }
+  .hero-refresh .hero-copy {
+    width: 100%;
+    padding: 25px 0 clamp(350px, 103vw, 470px) !important;
+  }
+  .hero-refresh .hero-copy h1 { font-size: clamp(34px, 9vw, 44px) !important; }
+}
